@@ -3,6 +3,8 @@ from datetime import date
 from pathlib import Path
 import pandas as pd
 
+from app.data.sources.base import DataSource
+
 
 def _safe(key: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", key)
@@ -27,7 +29,7 @@ class ParquetCache:
 
 
 class CachedDataSource:
-    def __init__(self, source: object, cache: ParquetCache) -> None:
+    def __init__(self, source: DataSource, cache: ParquetCache) -> None:
         self._source = source
         self._cache = cache
 
