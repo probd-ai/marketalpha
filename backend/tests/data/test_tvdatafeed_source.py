@@ -20,3 +20,10 @@ def test_get_ohlc_normalizes_and_slices():
     assert df.index.is_monotonic_increasing
     assert df.index.min().date() == date(2024, 1, 2)
     assert df["close"].tolist() == [11.0, 12.0]
+
+
+def test_get_ohlc_invalid_interval_raises_on_fake_client():
+    import pytest
+    src = TvDatafeedSource(client=_FakeTv())
+    with pytest.raises(ValueError):
+        src.get_ohlc("INFY", "NSE", "weekly", date(2024, 1, 2), date(2024, 1, 3))

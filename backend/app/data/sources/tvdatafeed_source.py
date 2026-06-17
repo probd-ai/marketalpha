@@ -3,11 +3,13 @@ import pandas as pd
 
 _COLUMNS = ["open", "high", "low", "close", "volume"]
 
+_INTERVAL_MAP: dict[str, str] = {"daily": "in_daily"}
+
 
 class TvDatafeedSource:
     """DataSource backed by the rongardF tvdatafeed fork."""
 
-    def __init__(self, username=None, password=None, client=None):
+    def __init__(self, username: str | None = None, password: str | None = None, client: object | None = None) -> None:
         if client is not None:
             self._client = client
             self._use_fake = True
@@ -16,17 +18,15 @@ class TvDatafeedSource:
             self._client = TvDatafeed(username=username, password=password)
             self._use_fake = False
 
-    def get_ohlc(self, symbol, exchange, interval, start, end):
+    def get_ohlc(self, symbol: str, exchange: str, interval: str, start: date, end: date) -> pd.DataFrame:
+        if interval not in _INTERVAL_MAP:
+            raise ValueError(f"unsupported interval: {interval}")
+
         if self._use_fake:
             interval_val = interval  # pass through as-is for fake clients
         else:
             from tvDatafeed import Interval
-            interval_map = {"daily": Interval.in_daily}
-            if interval not in interval_map:
-                raise ValueError(
-                    f"Unsupported interval {interval!r}. Valid: {list(interval_map)}"
-                )
-            interval_val = interval_map[interval]
+            interval_val = getattr(Interval, _INTERVAL_MAP[interval])
 
         n_bars = max((end - start).days * 2, 100)
         raw = self._client.get_hist(
