@@ -22,6 +22,10 @@ class TvDatafeedSource:
         else:
             from tvDatafeed import Interval
             interval_map = {"daily": Interval.in_daily}
+            if interval not in interval_map:
+                raise ValueError(
+                    f"Unsupported interval {interval!r}. Valid: {list(interval_map)}"
+                )
             interval_val = interval_map[interval]
 
         n_bars = max((end - start).days * 2, 100)
@@ -34,7 +38,8 @@ class TvDatafeedSource:
         df = raw.copy()
         df.columns = [c.lower() for c in df.columns]
         df = df[[c for c in _COLUMNS if c in df.columns]]
-        df.index = pd.to_datetime(df.index).tz_localize(None)
+        idx = pd.to_datetime(df.index)
+        df.index = idx.tz_convert(None) if idx.tz is not None else idx
         df = df.sort_index()
         mask = (df.index.date >= start) & (df.index.date <= end)
         return df.loc[mask]
