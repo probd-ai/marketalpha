@@ -1,0 +1,21 @@
+from pathlib import Path
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    data_dir: Path = Path("data")
+    tv_username: str | None = None
+    tv_password: str | None = None
+
+    @property
+    def cache_dir(self) -> Path:
+        return self.data_dir / "cache"
+
+    @property
+    def seed_dir(self) -> Path:
+        return self.data_dir / "seed"
+
+
+settings = Settings()
