@@ -55,7 +55,8 @@ def load_provider_from_seed(seed_dir: Path, anchor: date) -> IndexMembershipProv
     for current_csv in seed_dir.glob("*_current.csv"):
         prefix = current_csv.name[: -len("_current.csv")]
         index_key = prefix.upper()
-        current: set[str] = set(pd.read_csv(current_csv)["symbol"].astype(str).str.strip())
+        raw_symbols = pd.read_csv(current_csv)["symbol"].dropna().astype(str).str.strip()
+        current = {s for s in raw_symbols if s and s.lower() != "nan"}
         changelog: list[ChangeEvent] = []
         log_csv = seed_dir / f"{prefix}_changelog.csv"
         if log_csv.exists():

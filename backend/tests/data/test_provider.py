@@ -33,3 +33,9 @@ def test_load_from_seed(tmp_path):
     p = load_provider_from_seed(tmp_path, anchor=date(2026, 1, 1))
     assert p.members_as_of("NIFTY50", date(2021, 1, 1)) == {"AAA", "OLD"}
     assert "NEW" in p.members_as_of("NIFTY50", date(2023, 1, 1))
+
+
+def test_load_from_seed_ignores_blank_symbols(tmp_path):
+    (tmp_path / "nifty50_current.csv").write_text("symbol\nAAA\n\n")
+    p = load_provider_from_seed(tmp_path, anchor=date(2026, 1, 1))
+    assert p.members_as_of("NIFTY50", date(2026, 1, 1)) == {"AAA"}
