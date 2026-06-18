@@ -63,10 +63,16 @@ class BacktestEngine:
         panel = pd.DataFrame(series)
 
         rebal_dates = monthly_rebalance_dates(panel.index)
+        panel_dates = sorted(panel.index)
         schedule: list[tuple[date, dict[str, float]]] = []
         for d in rebal_dates:
+            prior = [ts for ts in panel_dates if ts.date() < d]
+            if not prior:
+                warnings.append(f"no prior close for rebalance {d}")
+                continue
+            signal_date = prior[-1].date()
             members = self._provider.members_as_of(cfg.index, d)
-            weights = self._strategy.select(panel, nifty, members, d, cfg)
+            weights = self._strategy.select(panel, nifty, members, signal_date, cfg)
             if weights:
                 schedule.append((d, weights))
             else:
