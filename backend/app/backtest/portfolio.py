@@ -3,6 +3,11 @@ from datetime import date
 import pandas as pd
 
 
+def _price(row: pd.Series, s: str) -> float:
+    v = row.get(s)
+    return 0.0 if v is None or pd.isna(v) else float(v)
+
+
 @dataclass
 class SimResult:
     equity: pd.Series
@@ -35,7 +40,7 @@ def simulate(
 
         if d in rebal:
             port_value: float = cash + sum(
-                sh * float(row.get(s, 0.0) or 0.0) for s, sh in shares.items()
+                sh * _price(row, s) for s, sh in shares.items()
             )
             target: dict[str, float] = {s: w * port_value for s, w in rebal[d].items()}
             new_shares: dict[str, float] = {}
@@ -55,7 +60,7 @@ def simulate(
             shares = new_shares
 
         equity_points[ts] = cash + sum(
-            sh * float(row.get(s, 0.0) or 0.0) for s, sh in shares.items()
+            sh * _price(row, s) for s, sh in shares.items()
         )
 
     equity: pd.Series = pd.Series(equity_points)
