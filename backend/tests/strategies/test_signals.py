@@ -28,12 +28,11 @@ def test_trailing_slope_r2_uses_last_lookback(linear_series):
 
 
 def test_rank_blend_orders_by_average_rank():
-    slopes = pd.Series({"A": 0.1, "B": 0.3, "C": 0.2})
-    r2s = pd.Series({"A": 0.9, "B": 0.5, "C": 0.7})
+    slopes = pd.Series({"A": 0.1, "B": 0.2, "C": 0.3})
+    r2s = pd.Series({"A": 0.5, "B": 0.6, "C": 0.7})
     blended = rank_blend(slopes, r2s)
-    # A: 0.5*1 + 0.5*3 = 2.0 ; B: 0.5*3 + 0.5*1 = 2.0 ; C: 0.5*2 + 0.5*2 = 2.0
-    assert round(blended["C"], 6) == 2.0
-    assert set(blended.index) == {"A", "B", "C"}
+    # A lowest on both -> rank 1+1 avg; C highest on both -> rank 3+3 avg
+    assert blended["C"] > blended["B"] > blended["A"]
 
 
 def test_roc_22_bars(linear_series):
