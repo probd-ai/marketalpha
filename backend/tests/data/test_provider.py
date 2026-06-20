@@ -39,3 +39,20 @@ def test_load_from_seed_ignores_blank_symbols(tmp_path):
     (tmp_path / "nifty50_current.csv").write_text("symbol\nAAA\n\n")
     p = load_provider_from_seed(tmp_path, anchor=date(2026, 1, 1))
     assert p.members_as_of("NIFTY50", date(2026, 1, 1)) == {"AAA"}
+
+
+from app.data.universe.provider import BiasedUniverseProvider
+
+
+def test_biased_provider_returns_current_list_at_every_date():
+    p = BiasedUniverseProvider({"NIFTY50": {"A", "B"}})
+    assert p.members_as_of("NIFTY50", date(2019, 1, 1)) == {"A", "B"}
+    assert p.members_as_of("NIFTY50", date(2026, 1, 1)) == {"A", "B"}
+    assert p.union_over("NIFTY50", date(2019, 1, 1), date(2026, 1, 1)) == {"A", "B"}
+
+
+def test_biased_provider_returns_independent_copies():
+    p = BiasedUniverseProvider({"NIFTY50": {"A"}})
+    got = p.members_as_of("NIFTY50", date(2020, 1, 1))
+    got.add("Z")
+    assert p.members_as_of("NIFTY50", date(2020, 1, 1)) == {"A"}  # not mutated

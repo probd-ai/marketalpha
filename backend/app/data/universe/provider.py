@@ -69,3 +69,26 @@ def load_provider_from_seed(seed_dir: Path, anchor: date) -> IndexMembershipProv
                 ))
         by_index[index_key] = build_membership_intervals(current, changelog, anchor)
     return IndexMembershipProvider(by_index)
+
+
+class BiasedUniverseProvider:
+    """Survivorship-biased provider: returns today's constituents at every date."""
+
+    def __init__(self, members_by_index: dict[str, set[str]]) -> None:
+        self._by_index = {k: set(v) for k, v in members_by_index.items()}
+
+    def members_as_of(self, index: str, on: date) -> set[str]:
+        return set(self._by_index.get(index, set()))
+
+    def union_over(self, index: str, start: date, end: date) -> set[str]:
+        return set(self._by_index.get(index, set()))
+
+
+def load_biased_provider_from_seed(seed_dir: Path) -> BiasedUniverseProvider:
+    seed_dir = Path(seed_dir)
+    by_index: dict[str, set[str]] = {}
+    for current_csv in seed_dir.glob("*_current.csv"):
+        index_key = current_csv.name[: -len("_current.csv")].upper()
+        raw = pd.read_csv(current_csv)["symbol"].dropna().astype(str).str.strip()
+        by_index[index_key] = {s for s in raw if s and s.lower() != "nan"}
+    return BiasedUniverseProvider(by_index)
