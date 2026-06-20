@@ -177,3 +177,38 @@ materially changes this strategy's results.
 - yfinance delisted-NSE coverage uncertain → spike before relying on it for backfill.
 - Symbol identity: market-hunt stores prices symbol-keyed; index symbols are names-with-spaces — the
   adapter owns this mapping.
+
+## Results (2026-06-20) — NIFTY50, 6-year window
+
+Run: `python -m app.run_compare --index NIFTY50 --years 6` (window ≈ 2020-06 → 2026-06, monthly
+rebalance, equal-weight top-10, 0 costs). Real prices from market-hunt Mongo; point-in-time membership
+from the verified 9-event NIFTY50 changelog.
+
+| Metric | Biased (today's list) | Point-in-time | Effect of bias |
+|---|---|---|---|
+| Total return | 236.4% | 112.6% | inflated |
+| CAGR | 23.3% | 13.9% | +9.4 pp |
+| Sharpe | 1.26 | 0.84 | |
+| Sortino | 1.59 | 1.10 | |
+| Max drawdown | −21.7% | −25.4% | understated risk |
+| **Alpha vs Nifty 50** | **+1.16** | **−0.08** | **flips negative** |
+| Final value (₹1M start) | ₹3,363,467 | ₹2,125,805 | **+58.2%** (`final_pct`) |
+
+**Verdict: the bias is decisive, not negligible.** The survivorship-biased backtest looks like a strategy
+that strongly beats the index (alpha +1.16). Corrected to point-in-time, the same strategy *slightly lags*
+the Nifty 50 (alpha −0.08). The apparent edge was almost entirely membership look-ahead + survivorship —
+refuting the hypothesis that bias is immaterial for a monthly-rebalanced momentum strategy with a
+multi-year listing screen.
+
+**Coverage: 60/63 ever-members covered; 3 missing — `HDFC`, `INFRATEL`, `LTIM`.** All three are
+delisted/merged or since-removed names (HDFC Ltd merged into HDFC Bank; Bharti Infratel → Indus Towers;
+LTIMindtree removed 2024) with no prices in Mongo. The `ETERNAL` (ex-ZOMATO) and `TMPV` (ex-TATAMOTORS)
+renames resolved cleanly — both carry full history under their current symbol.
+
+**The PIT result is an upper bound, not the floor.** The 3 uncovered names were removed *after weakness*;
+backfilling their prices (the deferred follow-on) would push point-in-time returns **lower**, widening the
+gap further. Transaction costs (turnover ≈ 110%/yr, here modeled at 0) would reduce both further.
+
+**Implication:** before this strategy is trusted, the point-in-time path is mandatory, and the next honest
+levers are (a) removed-name price backfill (yfinance/tvdatafeed) to close the residual 3-name hole, and
+(b) extending the same comparison to NIFTY500, where churn — and therefore bias — is larger.
