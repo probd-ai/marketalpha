@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     tv_username: str | None = None
     tv_password: str | None = None
+    mongo_uri: str = "mongodb://localhost:27017/"
+    mongo_db: str = "market_hunt"
 
     @property
     def cache_dir(self) -> Path:
