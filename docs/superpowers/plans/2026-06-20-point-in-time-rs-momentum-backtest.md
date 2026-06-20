@@ -215,7 +215,9 @@ class MongoDataSource:
         if not rows:
             return pd.DataFrame(columns=_OUT_COLS)
         df = pd.DataFrame(rows).rename(columns=_COL_MAP)
-        df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+        # market-hunt stores bars as UTC datetimes with an intraday time (e.g. 09:15);
+        # pymongo returns them tz-naive. Normalize to a clean tz-naive daily index.
+        df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_localize(None).dt.normalize()
         df = df.set_index("date").sort_index()
         return df[_OUT_COLS]
 ```
