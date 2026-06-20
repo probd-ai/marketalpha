@@ -53,6 +53,8 @@ def test_comparison_excludes_future_member_in_pit_run():
     biased_early = res.biased.holdings[0][1]
     pit_early = res.point_in_time.holdings[0][1]
     assert "LATE" in biased_early
+    assert pit_early  # PIT run must actually select something (not vacuously empty)
+    assert "STEADY" in pit_early or "OLD" in pit_early
     assert "LATE" not in pit_early
     assert res.coverage.total == 3 and res.coverage.missing == []
     assert set(res.delta) == {"biased_final", "pit_final", "final_abs", "final_pct"}
