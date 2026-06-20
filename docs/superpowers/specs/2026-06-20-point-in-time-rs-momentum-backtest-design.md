@@ -184,32 +184,39 @@ Run: `python -m app.run_compare --index NIFTY50 --years 6` (window ≈ 2020-06 �
 rebalance, equal-weight top-10, 0 costs). Real prices from market-hunt Mongo; point-in-time membership
 from the verified 9-event NIFTY50 changelog.
 
+Numbers below are after the LTIM coverage gap was closed (see "Coverage" note); the pre-LTIM run gave
+PIT CAGR 13.9% / excess −0.08 / +58.2% — loading the missing member made the gap *wider*, confirming the
+"upper bound" claim.
+
 | Metric | Biased (today's list) | Point-in-time | Effect of bias |
 |---|---|---|---|
-| Total return | 236.4% | 112.6% | inflated |
-| CAGR | 23.3% | 13.9% | +9.4 pp |
-| Sharpe | 1.26 | 0.84 | |
-| Sortino | 1.59 | 1.10 | |
+| Total return | 236.4% | 103.8% | inflated |
+| CAGR | 23.3% | 13.1% | +10.2 pp |
+| Sharpe | 1.26 | 0.80 | |
+| Sortino | 1.59 | 1.04 | |
 | Max drawdown | −21.7% | −25.4% | understated risk |
-| **Excess total return vs Nifty 50** | **+1.16** | **−0.08** | **flips negative** |
-| Final value (₹1M start) | ₹3,363,467 | ₹2,125,805 | **+58.2%** (`final_pct`) |
+| **Excess total return vs Nifty 50** | **+1.16** | **−0.17** | **flips negative** |
+| Final value (₹1M start) | ₹3,363,467 | ₹2,037,959 | **+65.0%** (`final_pct`) |
 
-(The `alpha` metric here is `total_return − benchmark_total_return` over the window — an *excess total return*, not a regression/CAPM alpha. The sign flip is the point: corrected for membership, the strategy moves from beating the index to slightly trailing it. Adding a true benchmark-regression alpha to `compute_metrics` is a worthwhile follow-up.)
+(The `alpha` metric here is `total_return − benchmark_total_return` over the window — an *excess total return*, not a regression/CAPM alpha. The sign flip is the point: corrected for membership, the strategy moves from beating the index to trailing it. Adding a true benchmark-regression alpha to `compute_metrics` is a worthwhile follow-up.)
 
 **Verdict: the bias is decisive, not negligible.** The survivorship-biased backtest looks like a strategy
-that strongly beats the index (alpha +1.16). Corrected to point-in-time, the same strategy *slightly lags*
-the Nifty 50 (alpha −0.08). The apparent edge was almost entirely membership look-ahead + survivorship —
+that strongly beats the index (excess +1.16). Corrected to point-in-time, the same strategy *lags*
+the Nifty 50 (excess −0.17). The apparent edge was almost entirely membership look-ahead + survivorship —
 refuting the hypothesis that bias is immaterial for a monthly-rebalanced momentum strategy with a
 multi-year listing screen.
 
-**Coverage: 60/63 ever-members covered; 3 missing — `HDFC`, `INFRATEL`, `LTIM`.** All three are
-delisted/merged or since-removed names (HDFC Ltd merged into HDFC Bank; Bharti Infratel → Indus Towers;
-LTIMindtree removed 2024) with no prices in Mongo. The `ETERNAL` (ex-ZOMATO) and `TMPV` (ex-TATAMOTORS)
-renames resolved cleanly — both carry full history under their current symbol.
+**Coverage: 61/63 ever-members covered; 2 missing — `HDFC`, `INFRATEL`.** Both are genuinely
+delisted/merged (HDFC Ltd → HDFC Bank; Bharti Infratel → Indus Towers) — no series exists anywhere.
+The third gap, `LTIM` (LTIMindtree), was *not* a delisting but a market-hunt loading gap; it was
+backfilled via tvdatafeed (2,454 bars) and is now covered. The `ETERNAL` (ex-ZOMATO) and `TMPV`
+(ex-TATAMOTORS) renames resolved cleanly — both carry full history under their current symbol.
 
-**The PIT result is an upper bound, not the floor.** The 3 uncovered names were removed *after weakness*;
-backfilling their prices (the deferred follow-on) would push point-in-time returns **lower**, widening the
-gap further. Transaction costs (turnover ≈ 110%/yr, here modeled at 0) would reduce both further.
+**Empirical confirmation of the "upper bound" claim:** before LTIM was loaded the PIT run scored CAGR 13.9%
+/ +58.2% gap; adding LTIM (a since-removed underperformer the PIT strategy actually held in 2023-24) pushed
+PIT *down* to 13.1% / +65.0%. More complete point-in-time coverage ⇒ lower honest return ⇒ wider bias. The
+2 remaining gaps (delisted laggards) would push it lower still. Transaction costs (turnover ≈ 110%/yr, here
+0) would reduce both further.
 
 **Implication:** before this strategy is trusted, the point-in-time path is mandatory, and the next honest
 levers are (a) removed-name price backfill (yfinance/tvdatafeed) to close the residual 3-name hole, and
