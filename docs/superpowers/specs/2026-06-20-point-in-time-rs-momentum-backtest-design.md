@@ -191,8 +191,10 @@ from the verified 9-event NIFTY50 changelog.
 | Sharpe | 1.26 | 0.84 | |
 | Sortino | 1.59 | 1.10 | |
 | Max drawdown | −21.7% | −25.4% | understated risk |
-| **Alpha vs Nifty 50** | **+1.16** | **−0.08** | **flips negative** |
+| **Excess total return vs Nifty 50** | **+1.16** | **−0.08** | **flips negative** |
 | Final value (₹1M start) | ₹3,363,467 | ₹2,125,805 | **+58.2%** (`final_pct`) |
+
+(The `alpha` metric here is `total_return − benchmark_total_return` over the window — an *excess total return*, not a regression/CAPM alpha. The sign flip is the point: corrected for membership, the strategy moves from beating the index to slightly trailing it. Adding a true benchmark-regression alpha to `compute_metrics` is a worthwhile follow-up.)
 
 **Verdict: the bias is decisive, not negligible.** The survivorship-biased backtest looks like a strategy
 that strongly beats the index (alpha +1.16). Corrected to point-in-time, the same strategy *slightly lags*
