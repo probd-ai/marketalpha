@@ -14,3 +14,11 @@ describe("format", () => {
     expect(formatPct(-4.2)).toBe("-4.2%");
   });
 });
+
+describe("format negatives", () => {
+  it("places the minus before the rupee sign", () => {
+    expect(formatINR(-1421000)).toBe("-₹14,21,000");
+    expect(formatLakh(-12000000)).toBe("-₹1.20Cr");
+    expect(formatLakh(-1421000)).toBe("-₹14.21L");
+  });
+});
