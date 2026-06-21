@@ -153,7 +153,7 @@ explicit error.
 Next.js 15 (App Router) · React 19 · TypeScript · Tailwind CSS 4 · TanStack Query (data) ·
 TanStack Table (holdings) · **Recharts** area chart for the ₹ curve (declarative, fits a simple
 two-series area; lightweight-charts available later if we add candlesticks) · fetch client to
-`http://localhost:3011`. API base via env (`NEXT_PUBLIC_API_BASE`).
+`http://localhost:3001`. API base via env (`NEXT_PUBLIC_API_BASE`).
 
 ### 5.2 Screens
 1. **Portfolios home** (`/`) — grid of glass portfolio cards: name, current ₹ value, return %, mini
