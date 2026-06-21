@@ -6,3 +6,6 @@ backend/data/cache/
 
 # market-hunt is a separate git repo (the running stopgap prototype), tracked independently
 market-hunt/
+
+# Brainstorm visual-companion artifacts
+.superpowers/
