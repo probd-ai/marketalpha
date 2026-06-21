@@ -10,20 +10,26 @@ import { HoldingsTable } from "@/components/detail/holdings-table";
 import { SleeveAttributionPanel } from "@/components/detail/sleeve-attribution";
 import { RebalancePanel } from "@/components/detail/rebalance-panel";
 import { AllocationBar } from "@/components/detail/allocation-bar";
+import { defaultInception, EARLIEST_INCEPTION } from "@/lib/format";
 
 export default function PortfolioDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [range, setRange] = useState<RangeKey>("1Y");
-  // Range maps to the run window; backend uses portfolio.inception_date as start, so range
-  // here only drives the as-of end_date today (1Y/Since-2022 affect inception via Edit). For v1,
-  // end_date is always today; range is a display affordance + future hook.
+  const [customStart, setCustomStart] = useState(defaultInception());
+
+  const startDate =
+    range === "1Y" ? defaultInception() :
+    range === "SINCE_2022" ? EARLIEST_INCEPTION :
+    customStart;
+
   const { data: portfolio } = usePortfolio(id);
-  const { data: run, isLoading, error } = useRunPortfolio(id);
+  const { data: run, isLoading, error, refetch } = useRunPortfolio(id, undefined, startDate);
 
   return (
     <div>
       <CommandBar name={portfolio?.name ?? "Portfolio"} asOf={run?.portfolio.as_of ?? "—"}
-        range={range} onRange={setRange} onRun={() => location.reload()} editHref={`/portfolio/${id}/edit`} />
+        range={range} onRange={setRange} onRun={() => refetch()} editHref={`/portfolio/${id}/edit`}
+        customStart={customStart} onCustomStart={setCustomStart} />
 
       {isLoading && <GlassPanel><span style={{ color: "var(--color-muted)" }}>Running sleeves… this can take a few seconds.</span></GlassPanel>}
       {error && (

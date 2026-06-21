@@ -30,8 +30,11 @@ export const api = {
   async deletePortfolio(id: string): Promise<{ success: boolean }> {
     return req(`/api/portfolio/${id}`, { method: "DELETE" });
   },
-  async runPortfolio(id: string, endDate?: string): Promise<RunResult> {
-    const q = endDate ? `?end_date=${endDate}` : "";
+  async runPortfolio(id: string, endDate?: string, startDate?: string): Promise<RunResult> {
+    const params = new URLSearchParams();
+    if (endDate) params.set("end_date", endDate);
+    if (startDate) params.set("start_date", startDate);
+    const q = params.toString() ? `?${params.toString()}` : "";
     return req<RunResult>(`/api/portfolio/${id}/run${q}`, { method: "POST" });
   },
   async listStrategies(): Promise<Strategy[]> {
