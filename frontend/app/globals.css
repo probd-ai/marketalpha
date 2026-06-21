@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0d18;
+  --color-pos: #34d399;
+  --color-neg: #fb7185;
+  --color-primary: #7c9cff;
+  --color-muted: #93a0bd;
+  --color-sleeve-1: #34d399;
+  --color-sleeve-2: #7c9cff;
+  --color-sleeve-3: #c084fc;
+  --color-sleeve-4: #f5b45a;
+  --color-sleeve-5: #2dd4bf;
+  --font-sans: Inter, system-ui, -apple-system, sans-serif;
+}
+
+html, body { min-height: 100%; }
+body {
+  color: #e7edf6;
+  font-family: var(--font-sans);
+  background:
+    radial-gradient(900px 500px at 12% -10%, #2a3566 0%, transparent 55%),
+    radial-gradient(800px 500px at 100% 0%, #3a2a5e 0%, transparent 50%),
+    radial-gradient(700px 600px at 70% 120%, #123a4a 0%, transparent 55%),
+    linear-gradient(160deg, #0c1020, #0a0d18 70%);
+  background-attachment: fixed;
+}
+.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+@utility glass {
+  background: linear-gradient(180deg, rgba(255,255,255,.085), rgba(255,255,255,.03));
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.16);
+  backdrop-filter: blur(14px) saturate(140%);
+}
