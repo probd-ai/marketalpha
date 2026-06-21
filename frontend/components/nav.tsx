@@ -20,7 +20,7 @@ export function Nav() {
       {item("Backtest")}
       <div style={{ fontSize: 9, letterSpacing: ".08em", textTransform: "uppercase",
         color: "var(--color-muted)", margin: "12px 8px 4px" }}>Your books</div>
-      {portfolios?.map((p) => item(p.name, `/portfolio/${p.id}`))}
+      {portfolios?.map((p) => <div key={p.id}>{item(p.name, `/portfolio/${p.id}`)}</div>)}
     </nav>
   );
 }

@@ -38,7 +38,7 @@ export default function PortfolioDetail({ params }: { params: Promise<{ id: stri
       {run && (
         <div style={{ display: "grid", gridTemplateColumns: "2.1fr 1fr", gap: 12 }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <KpiStrip summary={run.summary} />
+            <KpiStrip summary={run.summary} totalCapital={portfolio?.total_capital ?? run.summary.total_value} />
             <GlassPanel>
               <div style={{ fontSize: 9, letterSpacing: ".10em", textTransform: "uppercase",
                 color: "var(--color-muted)", fontWeight: 600, marginBottom: 8 }}>
