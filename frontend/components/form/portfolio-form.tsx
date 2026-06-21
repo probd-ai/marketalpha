@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import type { Portfolio, Sleeve } from "@/lib/types";
-import { useUniverses, useStrategies, useCreatePortfolio, useUpdatePortfolio } from "@/lib/queries";
+import { useUniverses, useCreatePortfolio, useUpdatePortfolio } from "@/lib/queries";
 import { SleeveRow } from "./sleeve-row";
 import { GlassPanel } from "@/components/ui/glass";
 import { validatePortfolioForm, sleeveWeightSum } from "@/lib/validation";
@@ -20,7 +20,6 @@ const F = { padding: "6px 9px", borderRadius: 8, background: "rgba(255,255,255,.
 
 export function PortfolioForm({ initial, onSaved }: { initial?: Portfolio; onSaved: (id: string) => void }) {
   const { data: universes } = useUniverses();
-  const { data: strategies } = useStrategies();
   const create = useCreatePortfolio();
   const update = useUpdatePortfolio(initial?.id ?? "");
 
@@ -62,13 +61,13 @@ export function PortfolioForm({ initial, onSaved }: { initial?: Portfolio; onSav
       </GlassPanel>
 
       {form.sleeves.map((s, i) => (
-        <SleeveRow key={s.id} sleeve={s} universes={universes} strategies={strategies}
+        <SleeveRow key={s.id} sleeve={s} universes={universes}
           onChange={(ns) => setSleeve(i, ns)}
           onRemove={() => setForm({ ...form, sleeves: form.sleeves.filter((_, j) => j !== i) })} />
       ))}
 
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <button onClick={() => setForm({ ...form, sleeves: [...form.sleeves, newSleeve(100)] })} style={F}>+ Add sleeve</button>
+        <button onClick={() => setForm({ ...form, sleeves: [...form.sleeves, newSleeve(0)] })} style={F}>+ Add sleeve</button>
         <span className="num" style={{ color: Math.abs(sum - 100) > 0.5 ? "var(--color-neg)" : "var(--color-pos)" }}>
           weights = {sum}%
         </span>

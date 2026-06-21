@@ -22,8 +22,10 @@ function wrap(ui: React.ReactNode) {
 describe("PortfolioForm", () => {
   it("blocks save when weights do not sum to 100", () => {
     render(wrap(<PortfolioForm onSaved={() => {}} />));
-    // default form has one sleeve at weight 100 → add a second sleeve to break the sum
+    // add a second sleeve (weight 0 → sum still 100), then set its weight to 50 → sum = 150
     fireEvent.click(screen.getByText(/add sleeve/i));
+    const weightInputs = screen.getAllByTitle("weight %");      // [existing=100, new=0]
+    fireEvent.change(weightInputs[weightInputs.length - 1], { target: { value: "50" } }); // sum=150
     fireEvent.click(screen.getByText(/save/i));
     expect(screen.getByText(/sum to 100/i)).toBeInTheDocument();
   });
