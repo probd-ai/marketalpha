@@ -6,6 +6,10 @@ import { KpiStrip } from "@/components/detail/kpi-strip";
 import { PerfCurve } from "@/components/detail/perf-curve";
 import { GlassPanel } from "@/components/ui/glass";
 import { ApiError } from "@/lib/api";
+import { HoldingsTable } from "@/components/detail/holdings-table";
+import { SleeveAttributionPanel } from "@/components/detail/sleeve-attribution";
+import { RebalancePanel } from "@/components/detail/rebalance-panel";
+import { AllocationBar } from "@/components/detail/allocation-bar";
 
 export default function PortfolioDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -42,10 +46,13 @@ export default function PortfolioDetail({ params }: { params: Promise<{ id: stri
               </div>
               <PerfCurve curve={run.curve} />
             </GlassPanel>
-            <div id="holdings-slot" />{/* filled in Task 7 */}
+            <HoldingsTable book={run.current_book} />
           </div>
-          <div id="right-slot" style={{ display: "flex", flexDirection: "column", gap: 12 }} />
-          {/* right column panels added in Task 7 */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <SleeveAttributionPanel sleeves={run.sleeves} />
+            <RebalancePanel actions={run.rebalance_actions} />
+            <AllocationBar sleeves={run.sleeves} totalCapital={portfolio?.total_capital ?? run.summary.total_value} />
+          </div>
         </div>
       )}
     </div>
