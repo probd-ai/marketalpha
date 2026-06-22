@@ -31,7 +31,7 @@ export default function PortfolioDetail({ params }: { params: Promise<{ id: stri
         range={range} onRange={setRange} onRun={() => refetch()} editHref={`/portfolio/${id}/edit`}
         customStart={customStart} onCustomStart={setCustomStart} />
 
-      {isLoading && <GlassPanel><span style={{ color: "var(--color-muted)" }}>Running sleeves… this can take a few seconds.</span></GlassPanel>}
+      {isLoading && <GlassPanel><span style={{ color: "var(--color-muted)" }}>Running sleeves over the selected window — this can take up to a minute for long windows.</span></GlassPanel>}
       {error && (
         <GlassPanel>
           <div style={{ color: "var(--color-neg)", fontWeight: 600 }}>Run failed</div>

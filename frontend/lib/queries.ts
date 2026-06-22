@@ -7,7 +7,7 @@ export const usePortfolios = () => useQuery({ queryKey: ["portfolios"], queryFn:
 export const usePortfolio = (id: string) =>
   useQuery({ queryKey: ["portfolio", id], queryFn: () => api.getPortfolio(id), enabled: !!id });
 export const useRunPortfolio = (id: string, endDate?: string, startDate?: string) =>
-  useQuery({ queryKey: ["run", id, endDate ?? "today", startDate ?? "default"], queryFn: () => api.runPortfolio(id, endDate, startDate), enabled: !!id });
+  useQuery({ queryKey: ["run", id, endDate ?? "today", startDate ?? "default"], queryFn: () => api.runPortfolio(id, endDate, startDate), enabled: !!id, staleTime: Infinity, gcTime: 10 * 60 * 1000, retry: false, refetchOnMount: false, refetchOnWindowFocus: false, refetchOnReconnect: false });
 export const useStrategies = () => useQuery({ queryKey: ["strategies"], queryFn: api.listStrategies });
 export const useUniverses = () => useQuery({ queryKey: ["universes"], queryFn: api.listUniverses });
 
