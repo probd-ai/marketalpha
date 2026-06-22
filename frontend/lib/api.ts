@@ -32,12 +32,27 @@ export const api = {
   async deletePortfolio(id: string): Promise<{ success: boolean }> {
     return req(`/api/portfolio/${id}`, { method: "DELETE" });
   },
-  async runPortfolio(id: string, endDate?: string, startDate?: string): Promise<RunResult> {
+  async startPortfolioRun(id: string, endDate?: string, startDate?: string): Promise<{ job_id: string; status: string }> {
     const params = new URLSearchParams();
-    if (endDate) params.set("end_date", endDate);
     if (startDate) params.set("start_date", startDate);
-    const q = params.toString() ? `?${params.toString()}` : "";
-    return req<RunResult>(`/api/portfolio/${id}/run${q}`, { method: "POST" });
+    if (endDate) params.set("end_date", endDate);
+    const qs = params.toString();
+    return req(`/api/portfolio/${id}/run${qs ? `?${qs}` : ""}`, { method: "POST" });
+  },
+  async getRunStatus(jobId: string): Promise<{ status: string; result: RunResult | null; error: string | null }> {
+    return req(`/api/portfolio/run-status/${jobId}`);
+  },
+  async runPortfolio(id: string, endDate?: string, startDate?: string): Promise<RunResult> {
+    const { job_id } = await api.startPortfolioRun(id, endDate, startDate);
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const maxPolls = 200; // ~6-7 min ceiling at 2s
+    for (let i = 0; i < maxPolls; i++) {
+      await sleep(2000);
+      const s = await api.getRunStatus(job_id);
+      if (s.status === "completed" && s.result) return s.result;
+      if (s.status === "failed") throw new ApiError(0, s.error ?? "Run failed");
+    }
+    throw new ApiError(0, "Run timed out");
   },
   async listStrategies(): Promise<Strategy[]> {
     return (await req<{ strategies: Strategy[] }>("/api/simulation/strategies")).strategies;
