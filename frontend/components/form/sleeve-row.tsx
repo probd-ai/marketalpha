@@ -23,6 +23,11 @@ export function SleeveRow({ sleeve, onChange, onRemove, universes }:
       <select value={sleeve.rebalance_type} onChange={(e) => set({ rebalance_type: e.target.value })} style={F}>
         {["equal_weight", "skewed"].map((t) => <option key={t} value={t}>{t}</option>)}
       </select>
+      <select value={sleeve.rebalance_date} onChange={(e) => set({ rebalance_date: e.target.value })} style={F}>
+        <option value="first">First of month</option>
+        <option value="mid">Mid month</option>
+        <option value="last">Last of month</option>
+      </select>
       <select value={sleeve.momentum_ranking} onChange={(e) => set({ momentum_ranking: e.target.value })} style={F}>
         {["20_day_return", "price_roc_66d", "price_roc_222d", "risk_adjusted", "truevx_roc",
           "short_mean_roc", "mid_mean_roc", "long_mean_roc", "stock_score_roc"].map((r) =>
