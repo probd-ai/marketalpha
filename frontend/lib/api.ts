@@ -1,11 +1,13 @@
 import type { Portfolio, RunResult, Strategy, Universe } from "./types";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
+
 export class ApiError extends Error {
   constructor(public status: number, public detail: string) { super(detail); this.name = "ApiError"; }
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...init });
+  const res = await fetch(`${API_BASE}${path}`, { headers: { "Content-Type": "application/json" }, ...init });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
     try { detail = (await res.json()).detail ?? detail; } catch { /* keep default */ }
