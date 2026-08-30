@@ -1,11 +1,42 @@
-backend/.venv/
-__pycache__/
-*.pyc
-backend/data/cache/
+# ---------------------------------------------------------------- secrets
+# NEVER relax these. market-hunt/.env carries LIVE broker credentials
+# (DHAN_ACCESS_TOKEN, KITE_API_SECRET, TELEGRAM_BOT_TOKEN, MH_API_TOKEN).
+# `.env` matches at every depth; the explicit paths below are belt-and-braces.
 .env
-
-# market-hunt is a separate git repo (the running stopgap prototype), tracked independently
-market-hunt/
-
-# Brainstorm visual-companion artifacts
+*.env
+!*.env.example
+market-hunt/.env
+backend/.env
+frontend/.env.local
+*.pem
+*.key
 .superpowers/
+
+# ---------------------------------------------------------------- python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# ---------------------------------------------------------------- node
+node_modules/
+.next/
+out/
+.turbo/
+
+# ---------------------------------------------------------------- caches & artefacts
+backend/data/cache/
+market-hunt/scripts/output/
+*.log
+.vscode/
+.idea/
+*.swp
+.DS_Store

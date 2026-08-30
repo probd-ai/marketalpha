@@ -1,0 +1,12 @@
+# market-hunt dev/test dependencies
+-r requirements.txt
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1          # FastAPI TestClient transport
+pypdf==6.13.3          # PDF content assertions in tradebook tests
+
+# research scripts only (scripts/*.py) — uncomment if running them
+# scipy
+# scikit-learn
+# matplotlib

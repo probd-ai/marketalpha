@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+/* ============================================================================
+   Obsidian glass terminal — dark theme for the TrueVX quant terminal.
+   Tailwind v4 puts utilities in cascade layers; the UNLAYERED rules below
+   therefore override hardcoded utilities (bg-white, text-gray-900, …) on every
+   page without !important — a global re-skin. New surfaces use .glass/.mono.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;                /* native selects, date pickers, scrollbars -> dark */
+
+  --bg: #0a0e14;                     /* obsidian page */
+  --bg-grid: #0c111b;
+  --panel: #121826;                  /* solid card */
+  --panel-2: #161d2e;                /* elevated / hover */
+  --field: #0f1521;                  /* inputs */
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  --ink: #e6eaf2;                    /* primary text */
+  --ink-2: #c2c9d6;
+  --muted: #8b94a7;
+  --muted-2: #5b6678;
+
+  --accent: #22d3ee;                 /* signal cyan — highlights, links, focus */
+  --accent-fill: #0891b2;            /* button fill (white text readable) */
+  --accent-fill-hover: #0e7490;
+  --up: #34d399;
+  --down: #f87171;
+  --warn: #fbbf24;
+
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--ink);
+  --font-mono: var(--font-mono);
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--ink);
+}
+body {
+  /* subtle terminal grid wash */
+  background-image: radial-gradient(1200px 600px at 78% -12%, rgba(34, 211, 238, 0.06), transparent 60%);
+  background-attachment: fixed;
+}
+
+/* ---- utility re-skin (unlayered → beats Tailwind layered utilities) ---- */
+.bg-gray-50 { background-color: var(--bg); }
+.bg-white { background-color: var(--panel); }
+.bg-gray-100 { background-color: rgba(255, 255, 255, 0.06); }
+.bg-gray-200 { background-color: rgba(255, 255, 255, 0.10); }
+.bg-gray-800, .bg-gray-900 { background-color: var(--panel-2); }
+
+.text-gray-900 { color: var(--ink); }
+.text-gray-800, .text-gray-700 { color: var(--ink-2); }
+.text-gray-600, .text-gray-500 { color: var(--muted); }
+.text-gray-400, .text-gray-300 { color: var(--muted-2); }
+.text-white { color: #ffffff; }
+
+.border-gray-100, .border-gray-200, .border-gray-300 { border-color: var(--border); }
+
+.hover\:bg-gray-50:hover, .hover\:bg-gray-100:hover { background-color: rgba(255, 255, 255, 0.06); }
+.hover\:bg-gray-200:hover { background-color: rgba(255, 255, 255, 0.10); }
+
+/* elevation reads as depth on dark, not a gray drop-shadow */
+.shadow-sm { box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 4px 14px rgba(0, 0, 0, 0.35); }
+.shadow, .shadow-md { box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 10px 28px rgba(0, 0, 0, 0.45); }
+.shadow-lg, .hover\:shadow-lg:hover { box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 18px 50px rgba(0, 0, 0, 0.55); }
+
+/* primary actions -> cyan fill (white text stays readable on cyan-600) */
+.bg-blue-600, .bg-indigo-600 { background-color: var(--accent-fill); }
+.hover\:bg-blue-700:hover, .hover\:bg-indigo-700:hover { background-color: var(--accent-fill-hover); }
+.text-blue-600, .text-indigo-600 { color: var(--accent); }
+.hover\:text-blue-800:hover { color: #67e8f9; }
+
+/* tinted strips (banners / diagnostics) -> dark-tinted, not glowing pastels */
+.bg-indigo-50 { background-color: rgba(34, 211, 238, 0.08); }
+.bg-blue-50 { background-color: rgba(34, 211, 238, 0.07); }
+.border-indigo-100, .border-indigo-200 { border-color: rgba(34, 211, 238, 0.22); }
+.text-indigo-600, .text-indigo-700, .text-indigo-800 { color: var(--accent); }
+.bg-amber-100 { background-color: rgba(251, 191, 36, 0.14); }
+.text-amber-800, .text-amber-700, .text-amber-600 { color: var(--warn); }
+.border-amber-300 { border-color: rgba(251, 191, 36, 0.3); }
+.bg-red-50 { background-color: rgba(248, 113, 113, 0.10); }
+.text-red-600, .text-red-700, .text-red-500 { color: var(--down); }
+.bg-green-100 { background-color: rgba(52, 211, 153, 0.14); }
+.text-green-600, .text-green-700 { color: var(--up); }
+.bg-blue-100 { background-color: rgba(34, 211, 238, 0.12); }
+.text-blue-700, .text-blue-800 { color: var(--accent); }
+
+/* native form controls */
+input, select, textarea {
+  background-color: var(--field);
+  color: var(--ink);
+  border-color: var(--border);
+}
+select option { background: var(--panel); color: var(--ink); }
+input::placeholder, textarea::placeholder { color: var(--muted-2); }
+
+/* scrollbars */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 6px; border: 2px solid transparent; background-clip: content-box; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); background-clip: content-box; }
+
+::selection { background: rgba(34, 211, 238, 0.30); color: #fff; }
+*:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+h1, h2 { letter-spacing: -0.02em; }
+
+/* ---- reusable theme utilities ---- */
+.glass {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+}
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.eyebrow { text-transform: uppercase; letter-spacing: 0.14em; font-size: 0.7rem; color: var(--muted); }
+.accent { color: var(--accent); }

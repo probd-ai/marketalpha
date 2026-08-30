@@ -1,0 +1,1084 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import Link from 'next/link';
+import { api } from '@/lib/api';
+import { SymbolMapping, SymbolMappingResponse, StockDataStatistics, DownloadStockDataRequest, ProgressUpdate, HistoricalProcessing, DataGapInfo } from '@/types';
+import { Card } from '@/components/ui/Card';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import { SymbolSearch } from '@/components/stocks/SymbolSearch';
+import { DashboardLayout } from '@/components/layout/DashboardLayout';
+import { 
+  CurrencyDollarIcon, 
+  CloudArrowDownIcon, 
+  ClockIcon, 
+  TrashIcon,
+  ArrowPathIcon,
+  CheckCircleIcon,
+  ExclamationTriangleIcon,
+  PlayIcon
+} from '@heroicons/react/24/outline';
+
+type LoadMode = 'symbol' | 'index' | 'industry';
+type SyncMode = 'load' | 'sync' | 'refresh' | 'delete';
+
+export default function StocksPage() {
+  const [downloadSymbol, setDownloadSymbol] = useState<string>('');
+  const [startDate, setStartDate] = useState<string>('2020-01-01'); // Default to 2020 for realistic gap analysis
+  const [endDate, setEndDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [selectedIndex, setSelectedIndex] = useState<string>('');
+  const [selectedIndustry, setSelectedIndustry] = useState<string>('');
+  const [symbolFilter, setSymbolFilter] = useState<string>(''); // New filter for symbol search
+  const [mappedOnly, setMappedOnly] = useState<boolean>(true);
+  const [loadMode, setLoadMode] = useState<LoadMode>('symbol');
+  const [syncMode, setSyncMode] = useState<SyncMode>('load');
+  const [activeTaskId, setActiveTaskId] = useState<string>('');
+  const [showProgress, setShowProgress] = useState<boolean>(false);
+  const [dataGaps, setDataGaps] = useState<DataGapInfo[]>([]);
+  const [showGaps, setShowGaps] = useState<boolean>(false);
+  
+  const queryClient = useQueryClient();
+
+  // Fetch symbol mappings
+  const { data: symbolMappingsResponse, isLoading: mappingsLoading, error: mappingsError } = useQuery({
+    queryKey: ['symbolMappings', { 
+      index_name: selectedIndex, 
+      industry: selectedIndustry,
+      symbol_filter: symbolFilter,
+      mapped_only: mappedOnly 
+    }],
+    queryFn: () => api.getSymbolMappings({ 
+      index_name: selectedIndex || undefined, 
+      industry: selectedIndustry || undefined,
+      symbol_search: symbolFilter || undefined,
+      mapped_only: mappedOnly,
+      limit: symbolFilter ? 50 : 200  // Show more results when not searching
+    }),
+  });
+
+  const symbolMappings = symbolMappingsResponse?.mappings || [];
+
+  // No client-side filtering needed - all filtering is done server-side
+  const filteredSymbolMappings = symbolMappings;
+
+  // Fetch stock statistics
+  const { data: statistics, isLoading: statsLoading } = useQuery({
+    queryKey: ['stockStatistics'],
+    queryFn: () => api.getStockDataStatistics(),
+  });
+
+  // Fetch progress updates for active task
+  const { data: progressData } = useQuery({
+    queryKey: ['taskProgress', activeTaskId],
+    queryFn: () => api.getTaskProgress(activeTaskId),
+    enabled: !!activeTaskId && showProgress,
+    refetchInterval: 2000, // Poll every 2 seconds
+  });
+
+  // Refresh symbol mappings mutation
+  const refreshMappingsMutation = useMutation({
+    mutationFn: () => api.refreshSymbolMappings(),
+    onSuccess: (response) => {
+      queryClient.invalidateQueries({ queryKey: ['symbolMappings'] });
+      // Show success message
+      const message = response.message || 'Mappings refreshed successfully';
+      const totalMappings = response.total_mappings || 0;
+      alert(`✅ Refresh Complete!\n📝 Mappings: ${totalMappings} symbols processed\n${message}`);
+    },
+    onError: (error: any) => {
+      console.error('Refresh mappings error:', error);
+      alert(`Failed to refresh mappings: ${error.message || 'Unknown error'}`);
+    },
+  });
+
+  // Refresh status mutation
+  const refreshStatusMutation = useMutation({
+    mutationFn: () => api.updateSymbolStatus(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['symbolMappings'] });
+      alert('Symbol status updated successfully!');
+    },
+    onError: (error: any) => {
+      console.error('Refresh status error:', error);
+      alert(`Failed to update status: ${error.message || 'Unknown error'}`);
+    },
+  });
+
+  // Load data for specific symbol mutation
+  const loadSymbolDataMutation = useMutation({
+    mutationFn: ({ symbol, syncMode }: { symbol: string; syncMode: 'load' | 'refresh' }) => 
+      api.loadSymbolData(symbol, syncMode),
+    onSuccess: (response, variables) => {
+      // Refresh the mappings to show updated status
+      queryClient.invalidateQueries({ queryKey: ['symbolMappings'] });
+      // Show success message
+      alert(`Data ${variables.syncMode === 'load' ? 'loaded' : 'refreshed'} successfully for ${variables.symbol}!`);
+    },
+    onError: (error: any) => {
+      console.error('Load data error:', error);
+      alert(`Failed to load data: ${error.message || 'Unknown error'}`);
+    },
+  });
+
+  // Check data gaps mutation
+  const checkGapsMutation = useMutation({
+    mutationFn: (request: { symbol?: string; symbols?: string[]; index_name?: string; industry?: string; start_date: string; end_date: string }) => 
+      api.checkDataGaps(request),
+    onSuccess: (gaps: any) => {
+      setDataGaps(gaps);
+      setShowGaps(gaps.length > 0);
+    },
+    onError: (error: any) => {
+      console.error('Gap analysis error:', error);
+      setDataGaps([]);
+      setShowGaps(false);
+    },
+  });
+
+  // Load stock data mutation
+  const loadDataMutation = useMutation({
+    mutationFn: (request: DownloadStockDataRequest) => api.downloadStockData(request),
+    onSuccess: (response) => {
+      setActiveTaskId(response.task_id);
+      setShowProgress(true);
+      queryClient.invalidateQueries({ queryKey: ['stockStatistics'] });
+      queryClient.invalidateQueries({ queryKey: ['processingHistory'] });
+    },
+  });
+
+  // Delete stock data mutation
+  const deleteDataMutation = useMutation({
+    mutationFn: (request: { symbol?: string; symbols?: string[]; index_name?: string; industry?: string }) => 
+      api.deleteStockData(request),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['stockStatistics'] });
+      queryClient.invalidateQueries({ queryKey: ['stockData'] });
+    },
+  });
+
+  // Get unique indices and industries from mappings
+  const uniqueIndices = Array.from(
+    new Set((symbolMappings || []).flatMap(mapping => mapping.index_names || []))
+  ).sort();
+  
+  const uniqueIndustries = Array.from(
+    new Set((symbolMappings || []).map(mapping => mapping.industry))
+  ).filter(Boolean).sort();
+
+  const handleCheckGaps = async () => {
+    const request: any = {
+      start_date: startDate,
+      end_date: endDate,
+      full_check: true  // Enable complete historical analysis with NSE discovery
+    };
+
+    if (loadMode === 'symbol' && downloadSymbol) {
+      request.symbol = downloadSymbol;
+    } else if (loadMode === 'index' && selectedIndex) {
+      request.index_name = selectedIndex;
+    } else if (loadMode === 'industry' && selectedIndustry) {
+      request.industry = selectedIndustry;
+    }
+
+    checkGapsMutation.mutate(request);
+  };
+
+  const handleLoadData = async () => {
+    const request: DownloadStockDataRequest = {
+      start_date: startDate,
+      end_date: endDate,
+      sync_mode: syncMode,
+    };
+
+    if (loadMode === 'symbol' && downloadSymbol) {
+      request.symbol = downloadSymbol;
+    } else if (loadMode === 'index' && selectedIndex) {
+      request.index_name = selectedIndex;
+    } else if (loadMode === 'industry' && selectedIndustry) {
+      request.industry = selectedIndustry;
+    }
+
+    // Auto-check gaps if in load mode
+    if (syncMode === 'load') {
+      await handleCheckGaps();
+    }
+
+    loadDataMutation.mutate(request);
+  };
+
+  const handleDeleteData = async () => {
+    if (!confirm('Are you sure you want to delete this data? This action cannot be undone.')) {
+      return;
+    }
+
+    const request: any = {};
+
+    if (loadMode === 'symbol' && downloadSymbol) {
+      request.symbol = downloadSymbol;
+    } else if (loadMode === 'index' && selectedIndex) {
+      request.index_name = selectedIndex;
+    } else if (loadMode === 'industry' && selectedIndustry) {
+      request.industry = selectedIndustry;
+    }
+
+    deleteDataMutation.mutate(request);
+  };
+
+  const handleRefreshMappings = () => {
+    refreshMappingsMutation.mutate();
+  };
+
+  const isFormValid = () => {
+    if (loadMode === 'symbol') return !!downloadSymbol;
+    if (loadMode === 'index') return !!selectedIndex;
+    if (loadMode === 'industry') return !!selectedIndustry;
+    return false;
+  };
+
+  const getCurrentSelection = () => {
+    if (loadMode === 'symbol') return downloadSymbol;
+    if (loadMode === 'index') return selectedIndex;
+    if (loadMode === 'industry') return selectedIndustry;
+    return '';
+  };
+
+  // Close progress panel when task completes
+  useEffect(() => {
+    if (progressData && (progressData.status === 'completed' || progressData.status === 'failed')) {
+      const timer = setTimeout(() => {
+        setShowProgress(false);
+        setActiveTaskId('');
+        queryClient.invalidateQueries({ queryKey: ['stockStatistics'] });
+        queryClient.invalidateQueries({ queryKey: ['stockData'] });
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [progressData, queryClient]);
+
+  // Error handling for symbol mappings
+  if (mappingsError) {
+    return (
+      <div className="space-y-6">
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <div className="flex items-center">
+            <ExclamationTriangleIcon className="h-5 w-5 text-red-400 mr-2" />
+            <h3 className="text-red-800 font-medium">Error Loading Symbol Mappings</h3>
+          </div>
+          <p className="text-red-700 mt-2">
+            {mappingsError instanceof Error ? mappingsError.message : 'Failed to load symbol mappings'}
+          </p>
+          <Button 
+            onClick={handleRefreshMappings}
+            className="mt-3 bg-red-600 hover:bg-red-700"
+            disabled={refreshMappingsMutation.isPending}
+          >
+            {refreshMappingsMutation.isPending ? 'Refreshing...' : 'Retry'}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <DashboardLayout>
+      <div className="space-y-6">
+        {/* Header */}
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-3xl font-bold">Price Data Management</h1>
+          <p className="text-gray-600 mt-2">
+            Load stock data by symbol, index, or industry with intelligent synchronization
+          </p>
+        </div>
+        <div className="flex gap-3">
+          <Button
+            onClick={() => window.location.href = '/scheduler'}
+            variant="outline"
+            className="bg-purple-50 hover:bg-purple-100 border-purple-200"
+          >
+            <ClockIcon className="h-4 w-4 mr-2" />
+            📋 Open Scheduler
+          </Button>
+          <Button
+            onClick={handleRefreshMappings}
+            disabled={refreshMappingsMutation.isPending}
+            className="bg-blue-600 hover:bg-blue-700"
+          >
+            <ArrowPathIcon className="h-4 w-4 mr-2" />
+            {refreshMappingsMutation.isPending ? 'Refreshing...' : 'Refresh Mappings'}
+          </Button>
+        </div>
+      </div>
+
+      {/* Statistics Overview */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+        <Card className="p-6">
+          <div className="text-2xl font-bold text-blue-600">
+            {statistics?.total_records.toLocaleString() || '0'}
+          </div>
+          <div className="text-sm text-gray-600">Total Price Records</div>
+        </Card>
+        <Card className="p-6">
+          <div className="text-2xl font-bold text-green-600">
+            {statistics?.unique_symbols_count || '0'}
+          </div>
+          <div className="text-sm text-gray-600">Symbols with Data</div>
+        </Card>
+        <Card className="p-6">
+          <div className="text-2xl font-bold text-purple-600">
+            {symbolMappingsResponse?.total_mappings || '0'}
+          </div>
+          <div className="text-sm text-gray-600">Total Symbols</div>
+        </Card>
+        <Card className="p-6">
+          <div className="text-2xl font-bold text-green-600">
+            {symbolMappingsResponse?.mapped_count || '0'}
+          </div>
+          <div className="text-sm text-gray-600">Mapped Symbols</div>
+        </Card>
+        <Card className="p-6">
+          <div className="text-2xl font-bold text-orange-600">
+            {statistics ? new Date(statistics.date_range.latest).getFullYear() - new Date(statistics.date_range.earliest).getFullYear() + 1 : '0'}
+          </div>
+          <div className="text-sm text-gray-600">Years of Data</div>
+        </Card>
+      </div>
+
+      {/* Progress Panel */}
+      {showProgress && progressData && (
+        <Card className="p-6 border-l-4 border-l-blue-500">
+          <div className="flex justify-between items-start mb-4">
+            <div>
+              <h3 className="text-lg font-semibold">Loading Progress</h3>
+              <p className="text-sm text-gray-600">{progressData.current_item || 'Processing...'}</p>
+            </div>
+            <Button
+              onClick={() => setShowProgress(false)}
+              size="sm"
+              variant="outline"
+            >
+              ×
+            </Button>
+          </div>
+          
+          <div className="space-y-3">
+            <div className="flex justify-between text-sm">
+              <span>Progress: {progressData.current_count} / {progressData.total_count}</span>
+              <span className={`font-medium ${
+                progressData.status === 'completed' ? 'text-green-600' :
+                progressData.status === 'failed' ? 'text-red-600' :
+                'text-blue-600'
+              }`}>
+                {progressData.status === 'running' ? `${progressData.progress_percentage}%` : progressData.status}
+              </span>
+            </div>
+            
+            <div className="w-full bg-gray-200 rounded-full h-2">
+              <div 
+                className={`h-2 rounded-full transition-all duration-300 ${
+                  progressData.status === 'completed' ? 'bg-green-500' :
+                  progressData.status === 'failed' ? 'bg-red-500' :
+                  'bg-blue-500'
+                }`}
+                style={{ width: `${progressData.progress_percentage}%` }}
+              />
+            </div>
+
+            {progressData.message && (
+              <p className="text-sm text-gray-600">{progressData.message}</p>
+            )}
+
+            {progressData.error && (
+              <p className="text-sm text-red-600">Error: {progressData.error}</p>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {/* Data Loading Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card className="p-6">
+          <h2 className="text-xl font-semibold mb-4">Load Historical Data</h2>
+          <div className="space-y-4">
+            {/* Load Mode Selection */}
+            <div>
+              <label className="block text-sm font-medium mb-2">Load by</label>
+              <div className="grid grid-cols-3 gap-2">
+                <Button
+                  onClick={() => setLoadMode('symbol')}
+                  variant={loadMode === 'symbol' ? 'primary' : 'outline'}
+                  size="sm"
+                  className="w-full"
+                >
+                  Stock Symbol
+                </Button>
+                <Button
+                  onClick={() => setLoadMode('index')}
+                  variant={loadMode === 'index' ? 'primary' : 'outline'}
+                  size="sm"
+                  className="w-full"
+                >
+                  Index Name
+                </Button>
+                <Button
+                  onClick={() => setLoadMode('industry')}
+                  variant={loadMode === 'industry' ? 'primary' : 'outline'}
+                  size="sm"
+                  className="w-full"
+                >
+                  Industry
+                </Button>
+              </div>
+            </div>
+
+            {/* Selection Input */}
+            {loadMode === 'symbol' && (
+              <div>
+                <label className="block text-sm font-medium mb-2">Search & Select Symbol</label>
+                <SymbolSearch
+                  symbols={symbolMappings}
+                  onSelect={setDownloadSymbol}
+                  selectedSymbol={downloadSymbol}
+                />
+              </div>
+            )}
+
+            {loadMode === 'index' && (
+              <div>
+                <label className="block text-sm font-medium mb-2">Select Index</label>
+                <select
+                  value={selectedIndex}
+                  onChange={(e) => setSelectedIndex(e.target.value)}
+                  className="w-full border rounded px-3 py-2"
+                >
+                  <option value="">Choose an index...</option>
+                  {uniqueIndices.map(index => (
+                    <option key={index} value={index}>{index}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {loadMode === 'industry' && (
+              <div>
+                <label className="block text-sm font-medium mb-2">Select Industry</label>
+                <select
+                  value={selectedIndustry}
+                  onChange={(e) => setSelectedIndustry(e.target.value)}
+                  className="w-full border rounded px-3 py-2"
+                >
+                  <option value="">Choose an industry...</option>
+                  {uniqueIndustries.map(industry => (
+                    <option key={industry} value={industry}>{industry}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Date Range */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">Start Date</label>
+                <Input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="w-full"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">End Date</label>
+                <Input
+                  type="date"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  className="w-full"
+                />
+              </div>
+            </div>
+
+            {/* Action Mode Selection */}
+            <div>
+              <label className="block text-sm font-medium mb-2">Action</label>
+              <div className="grid grid-cols-3 gap-2">
+                <Button
+                  onClick={() => setSyncMode('load')}
+                  variant={syncMode === 'load' ? 'primary' : 'outline'}
+                  size="sm"
+                  className="w-full bg-green-50 hover:bg-green-100 border-green-200"
+                  title="Smart load: Detects earliest missing data and downloads from there (upsert)"
+                >
+                  <CloudArrowDownIcon className="h-4 w-4 mr-2" />
+                  Load & Sync
+                </Button>
+                <Button
+                  onClick={() => setSyncMode('refresh')}
+                  variant={syncMode === 'refresh' ? 'primary' : 'outline'}
+                  size="sm"
+                  className="w-full bg-yellow-50 hover:bg-yellow-100 border-yellow-200"
+                  title="Download all data from 2005 and replace existing (delete + insert)"
+                >
+                  <ArrowPathIcon className="h-4 w-4 mr-2" />
+                  Refresh
+                </Button>
+                <Button
+                  onClick={() => setSyncMode('delete')}
+                  variant={syncMode === 'delete' ? 'primary' : 'outline'}
+                  size="sm"
+                  className="w-full bg-red-50 hover:bg-red-100 border-red-200"
+                  title="Delete data for the specified period"
+                >
+                  <TrashIcon className="h-4 w-4 mr-2" />
+                  Delete
+                </Button>
+              </div>
+              <div className="text-xs text-gray-500 mt-1">
+                {syncMode === 'load' && 'Smart load: Start from earliest missing year and sync forward (upsert)'}
+                {syncMode === 'refresh' && 'Complete refresh: Download all data from 2005 and replace existing (delete + insert)'}
+                {syncMode === 'delete' && 'Remove existing data for the specified period only'}
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="space-y-2">
+              <Button
+                onClick={handleCheckGaps}
+                disabled={!isFormValid() || checkGapsMutation.isPending}
+                variant="outline"
+                className="w-full"
+                title="Analyzes complete data from 2005-01-01 to present and shows all missing trading days"
+              >
+                {checkGapsMutation.isPending ? 'Analyzing Complete History...' : '🔍 Complete Historical Gap Analysis'}
+              </Button>
+              <div className="text-xs text-gray-500 text-center">
+                Shows ALL missing data from 2005 to present, grouped by year for easy viewing
+              </div>
+              
+              <Button
+                onClick={syncMode === 'delete' ? handleDeleteData : handleLoadData}
+                disabled={!isFormValid() || loadDataMutation.isPending || deleteDataMutation.isPending}
+                className={`w-full ${
+                  syncMode === 'load' ? 'bg-green-600 hover:bg-green-700' :
+                  syncMode === 'refresh' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                  'bg-red-600 hover:bg-red-700'
+                }`}
+              >
+                {loadDataMutation.isPending || deleteDataMutation.isPending ? 'Processing...' : 
+                 syncMode === 'load' ? 'Load & Sync Data' :
+                 syncMode === 'refresh' ? 'Refresh Data' :
+                 'Delete Data'}
+              </Button>
+            </div>
+
+            {/* Status Messages */}
+            {loadDataMutation.isSuccess && (
+              <div className="text-green-600 text-sm">
+                ✓ Load started successfully! Track progress above.
+              </div>
+            )}
+            {loadDataMutation.isError && (
+              <div className="text-red-600 text-sm">
+                ✗ Load failed: {loadDataMutation.error?.message}
+              </div>
+            )}
+            {deleteDataMutation.isSuccess && (
+              <div className="text-green-600 text-sm">
+                ✓ Data deleted successfully!
+              </div>
+            )}
+            {deleteDataMutation.isError && (
+              <div className="text-red-600 text-sm">
+                ✗ Delete failed: {deleteDataMutation.error?.message}
+              </div>
+            )}
+          </div>
+        </Card>
+
+        <Card className="p-6">
+          <h2 className="text-xl font-semibold mb-4">Selection Summary</h2>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="text-center p-4 bg-blue-50 rounded-lg">
+                <div className="text-2xl font-bold text-blue-600">
+                  {loadMode === 'symbol' ? '1' :
+                   loadMode === 'index' ? (symbolMappings || []).filter(m => m.index_names && m.index_names.includes(selectedIndex)).length :
+                   loadMode === 'industry' ? (symbolMappings || []).filter(m => m.industry === selectedIndustry).length :
+                   '0'}
+                </div>
+                <div className="text-sm text-gray-600">Symbols Selected</div>
+              </div>
+              <div className="text-center p-4 bg-green-50 rounded-lg">
+                <div className="text-2xl font-bold text-green-600">
+                  {startDate && endDate ? 
+                    Math.ceil((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)) + 1 :
+                    '0'}
+                </div>
+                <div className="text-sm text-gray-600">Days Range</div>
+              </div>
+            </div>
+
+            {getCurrentSelection() && (
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <h4 className="font-medium mb-2">Current Selection</h4>
+                <div className="text-sm space-y-1">
+                  <div><strong>Type:</strong> {loadMode}</div>
+                  <div><strong>Selection:</strong> {getCurrentSelection()}</div>
+                  <div><strong>Date Range:</strong> {startDate} to {endDate}</div>
+                  <div><strong>Action:</strong> {syncMode}</div>
+                </div>
+              </div>
+            )}
+
+            {/* Enhanced Data Gaps Display with Yearly Breakdown - Only show if there are actual gaps */}
+            {showGaps && dataGaps.length > 0 && dataGaps.some(gap => 
+              (gap.downloadable_gaps && gap.downloadable_gaps > 0) || 
+              (gap.user_range_gaps && gap.user_range_gaps > 0)
+            ) && (
+              <div className="space-y-4">
+                {dataGaps
+                  .filter(gap => 
+                    (gap.downloadable_gaps && gap.downloadable_gaps > 0) || 
+                    (gap.user_range_gaps && gap.user_range_gaps > 0)
+                  )
+                  .slice(0, 3)
+                  .map((gap, index) => (
+                  <div key={index} className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+                    <div className="flex justify-between items-start mb-3">
+                      <h4 className="font-medium text-yellow-800">⚠️ Data Gaps for {gap.symbol}</h4>
+                      <div className="text-xs text-yellow-600">
+                        Total: {gap.total_data_points || 0} records available
+                      </div>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-4 text-sm mb-4">
+                      <div>
+                        <div className="text-yellow-700 mb-2">
+                          <strong>Complete Period Analysis (2005-Present):</strong>
+                        </div>
+                        <div className="space-y-1 text-xs">
+                          <div>• Missing trading days: <span className={`font-medium ${gap.downloadable_gaps && gap.downloadable_gaps > 0 ? 'text-red-600' : 'text-green-600'}`}>{gap.downloadable_gaps?.toLocaleString() || 0}</span></div>
+                          <div>• Data available: {gap.data_available_from || 'None'} to {gap.data_available_until || 'None'}</div>
+                          <div>• Available records: <span className="font-medium text-green-600">{gap.total_data_points?.toLocaleString() || 0}</span></div>
+                          <div className="text-blue-600">• ✓ Comprehensive gap analysis from 2005</div>
+                        </div>
+                      </div>
+                      
+                      <div>
+                        <div className="text-yellow-700 mb-2">
+                          <strong>Your Selected Range:</strong>
+                        </div>
+                        <div className="space-y-1 text-xs">
+                          <div>• Range: {gap.user_range_start} to {gap.user_range_end}</div>
+                          <div>• Missing in your range: <span className="font-medium text-orange-600">{gap.user_range_gaps || 0} days</span></div>
+                          {gap.user_range_gaps && gap.user_range_gaps > 0 && (
+                            <div className="text-orange-600">• ⚠️ Your range has missing data!</div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Yearly Gap Breakdown - Only show if there are actual gaps */}
+                    {gap.gaps_by_year && Object.keys(gap.gaps_by_year).length > 0 && 
+                     Object.entries(gap.gaps_by_year).some(([year, count]) => count > 0) && (
+                      <div className="p-3 bg-red-50 rounded text-xs mb-3 border border-red-200">
+                        <div className="text-red-700 mb-2 font-medium">📊 Missing Trading Days by Year (2005-Present):</div>
+                        <div className="text-xs text-red-600 mb-2">
+                          ⚠️ Large gaps detected! This symbol needs significant data download.
+                        </div>
+                        <div className="grid grid-cols-4 gap-2 max-h-32 overflow-y-auto">
+                          {Object.entries(gap.gaps_by_year)
+                            .filter(([, count]) => count > 0) // Only show years with actual gaps
+                            .sort(([a], [b]) => parseInt(b) - parseInt(a)) // Sort by year descending
+                            .slice(0, 16) // Show more years since we expect many
+                            .map(([year, count]) => (
+                              <div key={year} className="bg-white px-2 py-1 rounded border border-red-200">
+                                <div className="font-medium text-red-800">{year}</div>
+                                <div className="text-red-600">{count} days</div>
+                              </div>
+                            ))}
+                        </div>
+                        {Object.entries(gap.gaps_by_year).filter(([, count]) => count > 0).length > 16 && (
+                          <div className="text-red-600 mt-2">
+                            ...and {Object.entries(gap.gaps_by_year).filter(([, count]) => count > 0).length - 16} more years with gaps
+                          </div>
+                        )}
+                        <div className="text-blue-600 mt-2 text-xs bg-blue-50 p-2 rounded">
+                          💡 Tip: Use &quot;Sync All Missing Data&quot; to download complete historical data
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Sync Options - Enhanced */}
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          // Set start date to 2005 for complete historical data sync
+                          setStartDate('2005-01-01');
+                          setEndDate(new Date().toISOString().split('T')[0]);
+                          setSyncMode('sync');
+                        }}
+                        className="text-xs bg-red-50 hover:bg-red-100 border-red-200"
+                        disabled={!gap.downloadable_gaps || gap.downloadable_gaps === 0}
+                      >
+                        🔄 Sync All Missing Data
+                        {gap.downloadable_gaps && (
+                          <span className="ml-1 px-1 bg-red-200 rounded">
+                            {gap.downloadable_gaps.toLocaleString()} days
+                          </span>
+                        )}
+                      </Button>
+                      
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          // Only sync missing data in user's range
+                          setSyncMode('sync');
+                        }}
+                        className="text-xs bg-green-50 hover:bg-green-100 border-green-200"
+                        disabled={!gap.user_range_gaps || gap.user_range_gaps === 0}
+                      >
+                        📅 Sync Range Only
+                        {gap.user_range_gaps && (
+                          <span className="ml-1 px-1 bg-green-200 rounded">
+                            {gap.user_range_gaps} days
+                          </span>
+                        )}
+                      </Button>
+                      
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          // Skip this symbol - remove from gaps
+                          setDataGaps(prev => prev.filter((_, i) => i !== index));
+                        }}
+                        className="text-xs text-gray-500"
+                      >
+                        ⏭️ Skip Symbol
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+                
+                {dataGaps.length > 3 && (
+                  <div className="p-3 bg-gray-50 rounded-lg border border-gray-200 text-center">
+                    <div className="text-sm text-gray-600 mb-2">
+                      ...and {dataGaps.length - 3} more symbols with data gaps
+                    </div>
+                    <div className="text-xs text-gray-500 mb-3">
+                      Total downloadable gaps: {dataGaps.slice(3).reduce((sum, gap) => sum + (gap.downloadable_gaps || 0), 0)} days
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        // Batch sync all missing data for all symbols based on their discovered periods
+                        setStartDate('2005-01-01'); // Start from 2005 to trigger discovery
+                        setEndDate(new Date().toISOString().split('T')[0]);
+                        setSyncMode('sync');
+                        handleLoadData();
+                      }}
+                      className="text-xs bg-blue-50 hover:bg-blue-100 border-blue-200"
+                    >
+                      🔄 Discover & Sync All Symbols
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {showGaps && dataGaps.length === 0 && checkGapsMutation.isSuccess && (
+              <div className="p-4 bg-green-50 rounded-lg border border-green-200">
+                <h4 className="font-medium mb-2 text-green-800">✅ Intelligent Discovery Complete</h4>
+                <div className="text-sm text-green-700 space-y-1">
+                  <p>No data gaps found for the selected symbol(s) in their discoverable period!</p>
+                  <p className="text-xs text-green-600">
+                    ℹ️ We attempted download from 2005-01-01 to discover the actual downloadable range, 
+                    then verified no gaps exist in that period.
+                  </p>
+                  <p className="text-xs text-green-600">
+                    Your selected range: {startDate} to {endDate} ✓
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        </Card>
+      </div>
+
+      {/* Symbol Mappings Section */}
+      <Card className="p-6">
+        <div className="flex justify-between items-center mb-6">
+          <h2 className="text-xl font-semibold">Symbol Mappings</h2>
+          <div className="flex gap-2">
+            <Button
+              onClick={() => refreshStatusMutation.mutate()}
+              disabled={refreshStatusMutation.isPending}
+              size="sm"
+              variant="outline"
+            >
+              {refreshStatusMutation.isPending ? 'Updating...' : 'Refresh Status'}
+            </Button>
+            <Button
+              onClick={() => refreshMappingsMutation.mutate()}
+              disabled={refreshMappingsMutation.isPending}
+              size="sm"
+              variant="outline"
+            >
+              {refreshMappingsMutation.isPending ? 'Refreshing...' : 'Refresh Mappings'}
+            </Button>
+          </div>
+        </div>
+
+        {/* Enhanced Filter Section */}
+        <div className="bg-gray-50 p-4 rounded-lg mb-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Symbol Search Filter */}
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-700">
+                🔍 Search Symbol/Company
+              </label>
+              <input
+                type="text"
+                placeholder="Type symbol or company name..."
+                value={symbolFilter}
+                onChange={(e) => setSymbolFilter(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+              {symbolFilter && (
+                <div className="text-xs text-gray-500 mt-1">
+                  Showing symbols matching &quot;{symbolFilter}&quot;
+                </div>
+              )}
+            </div>
+
+            {/* Index Filter */}
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-700">
+                📊 Filter by Index
+              </label>
+              <select
+                value={selectedIndex}
+                onChange={(e) => setSelectedIndex(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="">All Indices</option>
+                {uniqueIndices.map(index => (
+                  <option key={index} value={index}>{index}</option>
+                ))}
+              </select>
+              {selectedIndex && (
+                <div className="text-xs text-gray-500 mt-1">
+                  Filtered by {selectedIndex}
+                </div>
+              )}
+            </div>
+
+            {/* Industry Filter */}
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-700">
+                🏭 Filter by Industry
+              </label>
+              <select
+                value={selectedIndustry}
+                onChange={(e) => setSelectedIndustry(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="">All Industries</option>
+                {uniqueIndustries.map(industry => (
+                  <option key={industry} value={industry}>{industry}</option>
+                ))}
+              </select>
+              {selectedIndustry && (
+                <div className="text-xs text-gray-500 mt-1">
+                  Filtered by {selectedIndustry}
+                </div>
+              )}
+            </div>
+
+            {/* Options & Clear Filters */}
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-700">
+                ⚙️ Options
+              </label>
+              <div className="space-y-2">
+                <label className="flex items-center text-sm">
+                  <input
+                    type="checkbox"
+                    checked={mappedOnly}
+                    onChange={(e) => setMappedOnly(e.target.checked)}
+                    className="mr-2"
+                  />
+                  Mapped symbols only
+                </label>
+                <Button
+                  onClick={() => {
+                    setSymbolFilter('');
+                    setSelectedIndex('');
+                    setSelectedIndustry('');
+                    setMappedOnly(true);
+                  }}
+                  size="sm"
+                  variant="ghost"
+                  className="text-xs p-1 h-auto"
+                >
+                  🧹 Clear all filters
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Filter Summary */}
+          <div className="mt-4 pt-3 border-t border-gray-200">
+            <div className="flex justify-between items-center text-sm">
+              <div className="text-gray-600">
+                Showing {filteredSymbolMappings.length} of {symbolMappingsResponse?.total_mappings || 0} symbols
+                {(symbolFilter || selectedIndex || selectedIndustry) && (
+                  <span className="ml-2 text-blue-600">
+                    (filtered: {[
+                      symbolFilter && `symbol: "${symbolFilter}"`,
+                      selectedIndex && `index: "${selectedIndex}"`,
+                      selectedIndustry && `industry: "${selectedIndustry}"`
+                    ].filter(Boolean).join(', ')})
+                  </span>
+                )}
+              </div>
+              <div className="text-gray-500">
+                Mapped: {symbolMappingsResponse?.mapped_count || 0} | 
+                Total: {symbolMappingsResponse?.total_mappings || 0}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {mappingsLoading ? (
+          <div className="flex justify-center py-8">
+            <div className="text-gray-500">Loading symbol mappings...</div>
+          </div>
+        ) : mappingsError ? (
+          <div className="text-red-600 py-4">
+            Error loading mappings: {String(mappingsError)}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full border-collapse border border-gray-300">
+              <thead>
+                <tr className="bg-gray-50">
+                  <th className="border border-gray-300 px-4 py-2 text-left">Symbol</th>
+                  <th className="border border-gray-300 px-4 py-2 text-left">Company</th>
+                  <th className="border border-gray-300 px-4 py-2 text-left">Industry</th>
+                  <th className="border border-gray-300 px-4 py-2 text-left">Indices</th>
+                  <th className="border border-gray-300 px-4 py-2 text-left">NSE Code</th>
+                  <th className="border border-gray-300 px-4 py-2 text-left">Data Status</th>
+                  <th className="border border-gray-300 px-4 py-2 text-left">Quality</th>
+                  <th className="border border-gray-300 px-4 py-2 text-left">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(filteredSymbolMappings || []).map((mapping, index) => (
+                  <tr key={`${mapping.symbol}-${index}`} className="hover:bg-gray-50">
+                    <td className="border border-gray-300 px-4 py-2 font-medium">
+                      {mapping.symbol}
+                    </td>
+                    <td className="border border-gray-300 px-4 py-2">
+                      {mapping.company_name}
+                    </td>
+                    <td className="border border-gray-300 px-4 py-2">
+                      {mapping.industry}
+                    </td>
+                    <td className="border border-gray-300 px-4 py-2">
+                      <div className="flex flex-wrap gap-1">
+                        {mapping.index_names.map(index => (
+                          <span
+                            key={index}
+                            className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded"
+                          >
+                            {index}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="border border-gray-300 px-4 py-2">
+                      {mapping.nse_scrip_code}
+                    </td>
+                    <td className="border border-gray-300 px-4 py-2">
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                        mapping.is_up_to_date === true 
+                          ? 'bg-green-100 text-green-800' 
+                          : mapping.is_up_to_date === false 
+                            ? 'bg-red-100 text-red-800' 
+                            : 'bg-gray-100 text-gray-800'
+                      }`}>
+                        {mapping.is_up_to_date === true ? '✓ Up-to-date' : mapping.is_up_to_date === false ? '✗ Outdated' : 'Unknown'}
+                      </span>
+                    </td>
+                    <td className="border border-gray-300 px-4 py-2">
+                      {mapping.data_quality_score !== null && mapping.data_quality_score !== undefined ? (
+                        <div className="flex items-center space-x-2">
+                          <div className={`w-12 h-2 rounded-full overflow-hidden ${
+                            mapping.data_quality_score >= 80 ? 'bg-green-200' : 
+                            mapping.data_quality_score >= 60 ? 'bg-yellow-200' : 'bg-red-200'
+                          }`}>
+                            <div 
+                              className={`h-full ${
+                                mapping.data_quality_score >= 80 ? 'bg-green-500' : 
+                                mapping.data_quality_score >= 60 ? 'bg-yellow-500' : 'bg-red-500'
+                              }`}
+                              style={{ width: `${mapping.data_quality_score}%` }}
+                            />
+                          </div>
+                          <span className="text-xs text-gray-600">
+                            {Math.round(mapping.data_quality_score)}%
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-gray-400">-</span>
+                      )}
+                    </td>
+                    <td className="border border-gray-300 px-4 py-2">
+                      <div className="flex space-x-1">
+                        <Button
+                          onClick={() => loadSymbolDataMutation.mutate({ symbol: mapping.symbol, syncMode: 'load' })}
+                          size="sm"
+                          variant="outline"
+                          disabled={loadSymbolDataMutation.isPending || !mapping.nse_scrip_code}
+                          className="text-xs px-2 py-1"
+                        >
+                          {loadSymbolDataMutation.isPending ? 'Loading...' : 'Load'}
+                        </Button>
+                        <Button
+                          onClick={() => loadSymbolDataMutation.mutate({ symbol: mapping.symbol, syncMode: 'refresh' })}
+                          size="sm"
+                          variant="outline"
+                          disabled={loadSymbolDataMutation.isPending || !mapping.nse_scrip_code}
+                          className="text-xs px-2 py-1"
+                        >
+                          Refresh
+                        </Button>
+                        <Link href={`/charts?symbol=${mapping.symbol}`}>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-xs px-2 py-1 text-blue-600 hover:text-blue-800"
+                          >
+                            Chart
+                          </Button>
+                        </Link>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+    </DashboardLayout>
+  );
+}

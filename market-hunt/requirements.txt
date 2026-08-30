@@ -1,0 +1,32 @@
+# market-hunt runtime dependencies — derived from actual imports (2026-07-10).
+# Install: pip install -r requirements.txt
+# Dev/test extras: requirements-dev.txt
+
+# --- web layer
+fastapi==0.137.2
+uvicorn==0.49.0
+
+# --- data layer (Mongo: async motor for app, pymongo for CLI tooling)
+motor==3.7.1
+pymongo==4.14.0
+
+# --- models / config / secrets
+pydantic==2.13.4
+python-dotenv==1.2.2
+cryptography==49.0.0
+
+# --- HTTP clients & scraping (NSE data, Dhan API, index CSV loaders)
+aiohttp==3.14.1
+requests==2.32.4
+beautifulsoup4==4.13.4
+
+# --- numerics
+numpy==2.3.2
+pandas==2.3.1
+
+# --- tradebook PDF generation (BSD-style license)
+reportlab==4.2.2
+
+# --- TradingView price feed — NOT on PyPI; installed from GitHub (MIT).
+# Repo has no release tags; pinned to main SHA (reports version 2.1.0, matches venv).
+tvdatafeed @ git+https://github.com/rongardF/tvdatafeed@e6f6aaa7de439ac6e454d9b26d2760ded8dc4923
