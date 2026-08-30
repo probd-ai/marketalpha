@@ -90,6 +90,8 @@ from app.routers import portfolio as portfolio_routes
 app.include_router(portfolio_routes.router)
 from app.routers import broker as broker_routes
 app.include_router(broker_routes.router)
+from app.routers import holdings as holdings_routes
+app.include_router(holdings_routes.router)
 from app.routers import rsz as rsz_routes
 app.include_router(rsz_routes.router)
 

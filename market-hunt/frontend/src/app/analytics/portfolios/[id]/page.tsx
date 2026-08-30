@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
+import BookReconciliationCard from '@/components/portfolio/BookReconciliationCard';
 import { ArrowLeft, Layers, Play, Pencil, Loader2, RefreshCw, Zap, Database, FileDown } from 'lucide-react';
 import {
   LineChart,
@@ -419,6 +420,37 @@ export default function PortfolioDetailPage() {
               </CardContent>
             </Card>
 
+            <Card>
+              <CardHeader className="pb-1">
+                <CardTitle className="text-base">Sleeve attribution</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-[10px] uppercase text-gray-500 border-b">
+                      <th className="py-1">Sleeve</th>
+                      <th className="py-1 text-right">Wt</th>
+                      <th className="py-1 text-right">Return</th>
+                      <th className="py-1 text-right">Contrib</th>
+                      <th className="py-1 text-right">Names</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.sleeves.map((a) => (
+                      <tr key={a.id} className="border-b border-gray-100">
+                        <td className="py-1.5 font-medium">{a.label}</td>
+                        <td className="py-1.5 text-right">{a.weight}%</td>
+                        <td className="py-1.5 text-right">
+                          <ReturnCell v={a.total_return} />
+                        </td>
+                        <td className="py-1.5 text-right">{pct(a.contribution)}</td>
+                        <td className="py-1.5 text-right">{a.holdings_count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
           </div>
 
           {/* ── Next-rebalance preview ───────────────────────────────
@@ -764,89 +796,12 @@ export default function PortfolioDetailPage() {
             </Card>
           </div>
 
-          {/* ── Sleeve attribution + current book ────────────────── */}
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-            <Card>
-              <CardHeader className="pb-1">
-                <CardTitle className="text-base">Sleeve attribution</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-left text-[10px] uppercase text-gray-500 border-b">
-                      <th className="py-1">Sleeve</th>
-                      <th className="py-1 text-right">Wt</th>
-                      <th className="py-1 text-right">Return</th>
-                      <th className="py-1 text-right">Contrib</th>
-                      <th className="py-1 text-right">Names</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.sleeves.map((a) => (
-                      <tr key={a.id} className="border-b border-gray-100">
-                        <td className="py-1.5 font-medium">{a.label}</td>
-                        <td className="py-1.5 text-right">{a.weight}%</td>
-                        <td className="py-1.5 text-right">
-                          <ReturnCell v={a.total_return} />
-                        </td>
-                        <td className="py-1.5 text-right">{pct(a.contribution)}</td>
-                        <td className="py-1.5 text-right">{a.holdings_count}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </CardContent>
-            </Card>
-
-            <Card className="xl:col-span-2">
-              <CardHeader className="pb-1">
-                <CardTitle className="text-base">
-                  Current book <span className="text-xs font-normal text-gray-500">({result.current_book.length} names)</span>
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="overflow-x-auto max-h-96 overflow-y-auto">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-white/95">
-                      <tr className="text-left text-[10px] uppercase text-gray-500 border-b">
-                        <th className="py-1 pr-2">Symbol</th>
-                        <th className="py-1 pr-2">Tier</th>
-                        <th className="py-1 pr-2">Sector</th>
-                        <th className="py-1 pr-2">Sleeve(s)</th>
-                        <th className="py-1 pr-2 text-right">Price</th>
-                        <th className="py-1 pr-2 text-right">Qty</th>
-                        <th className="py-1 pr-2 text-right">Value</th>
-                        <th className="py-1 pr-2 text-right">Wt</th>
-                        <th className="py-1 text-right">P&L</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.current_book.map((b) => (
-                        <tr key={b.symbol} className="border-b border-gray-50">
-                          <td className="py-1 pr-2 font-medium">{b.symbol}</td>
-                          <td className="py-1 pr-2">
-                            <span className="inline-block w-2 h-2 rounded-full mr-1" style={{ background: tierColor(b.index_tier || 'Other') }} />
-                            <span className="text-gray-500">{b.index_tier ?? '—'}</span>
-                          </td>
-                          <td className="py-1 pr-2 text-gray-500">{b.sector ?? '—'}</td>
-                          <td className="py-1 pr-2 text-gray-400">{b.sleeve}</td>
-                          <td className="py-1 pr-2 text-right">{b.current_price?.toFixed(2)}</td>
-                          <td className="py-1 pr-2 text-right font-medium">
-                            {b.quantity != null ? (Number.isInteger(b.quantity) ? b.quantity : b.quantity.toFixed(2)) : '—'}
-                          </td>
-                          <td className="py-1 pr-2 text-right">{inr(b.market_value)}</td>
-                          <td className="py-1 pr-2 text-right">{b.weight}%</td>
-                          <td className="py-1 text-right">
-                            <ReturnCell v={b.pnl_percent} />
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
+          {/* ── Book: system vs live, full width ─────────────────── */}
+          <BookReconciliationCard
+            portfolioId={params.id}
+            book={result.current_book}
+            tierColor={tierColor}
+          />
         </>
       )}
     </div>

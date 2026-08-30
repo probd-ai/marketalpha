@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { ArrowLeft, Layers, Loader2 } from 'lucide-react';
 import PortfolioForm from '@/components/portfolio/PortfolioForm';
+import LiveHoldingsPanel from '@/components/portfolio/LiveHoldingsPanel';
 import { Portfolio, portfolioApi } from '@/lib/portfolioApi';
 
 export default function EditPortfolioPage() {
@@ -37,6 +38,7 @@ export default function EditPortfolioPage() {
         </div>
       )}
       {portfolio && <PortfolioForm initial={portfolio} />}
+      {portfolio && <LiveHoldingsPanel portfolioId={params.id} />}
     </div>
   );
 }

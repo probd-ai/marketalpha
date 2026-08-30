@@ -7,18 +7,32 @@ import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Plus, Layers, Trash2, ArrowLeft, Loader2, RefreshCw } from 'lucide-react';
 import { Portfolio, portfolioApi, inr } from '@/lib/portfolioApi';
+import { HoldingsStatus, SYNC_UI, TONE_CLASS, holdingsApi } from '@/lib/holdingsApi';
 
 export default function PortfoliosPage() {
   const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Live-holdings state per portfolio. Fetched separately and never allowed to fail
+  // the page: reconciliation is secondary to listing the portfolios themselves.
+  const [sync, setSync] = useState<Record<string, HoldingsStatus>>({});
 
   const load = () => {
     setLoading(true);
     setError(null);
     portfolioApi
       .list()
-      .then((d) => setPortfolios(d.portfolios || []))
+      .then((d) => {
+        const list = d.portfolios || [];
+        setPortfolios(list);
+        list.forEach((p) => {
+          if (!p.id) return;
+          holdingsApi
+            .status(p.id)
+            .then((s) => setSync((prev) => ({ ...prev, [p.id as string]: s })))
+            .catch(() => undefined); // never block the list on a holdings read
+        });
+      })
       .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load portfolios'))
       .finally(() => setLoading(false));
   };
@@ -95,6 +109,17 @@ export default function PortfoliosPage() {
                   <CardTitle className="text-base">{p.name}</CardTitle>
                   <div className="flex items-center gap-1">
                     {p.point_in_time_membership && <Badge variant="secondary">PIT</Badge>}
+                    {p.id && sync[p.id] && (
+                      <span
+                        title={sync[p.id].sync.message}
+                        className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                          TONE_CLASS[SYNC_UI[sync[p.id].sync.state].tone]
+                        }`}
+                      >
+                        {SYNC_UI[sync[p.id].sync.state].label}
+                        {!!sync[p.id].gaps?.length && ` ${sync[p.id].gaps!.length}`}
+                      </span>
+                    )}
                   </div>
                 </div>
                 {p.description && <p className="text-xs text-gray-500">{p.description}</p>}
