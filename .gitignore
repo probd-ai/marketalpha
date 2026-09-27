@@ -4,6 +4,8 @@
 # `.env` matches at every depth; the explicit paths below are belt-and-braces.
 .env
 *.env
+.env.*
+!.env.example
 !*.env.example
 market-hunt/.env
 backend/.env
@@ -40,3 +42,12 @@ market-hunt/scripts/output/
 .idea/
 *.swp
 .DS_Store
+
+# research_grid outputs are regenerable; only scripts, the test fixtures and the report are tracked
+market-hunt/scripts/research_grid/**/*.csv
+market-hunt/scripts/research_grid/**/*.json
+market-hunt/scripts/research_grid/**/*.png
+market-hunt/scripts/research_grid/**/*.log
+market-hunt/scripts/research_grid/**/*.html
+market-hunt/scripts/research_grid/**/*.pyc
+market-hunt/scripts/research_grid/**/__pycache__/

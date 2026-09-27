@@ -3,7 +3,7 @@
 A trading desk for the five-sleeve model portfolio. The market-hunt backend computes the model, and you trade the
 weekly ticket by hand. There is no broker connection.
 
-Spec: `../docs/specs/2026-09-27-fund-trading-desk-design.md`
+Spec: `../docs/specs/2026-09-27-fund-trading-desk-design.md` · **Fund rules, weekly routine and full guide: [`../README.md`](../README.md).**
 
 ## Run it
 
