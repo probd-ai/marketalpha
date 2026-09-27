@@ -87,7 +87,7 @@ export default function Desk() {
               <div className="mt-2 text-[12px] text-muted">Back-test of the model with the fund&apos;s capital invested at the model start (point-in-time, next-open fills, full costs) — simulated, not realised returns.</div>
             </Card>
             <Card title="Sleeves">
-              <table className="grid">
+              <table className="data-table">
                 <thead><tr><th>Sleeve</th><th className="r">Target</th><th className="r">Now</th><th className="r">Value</th><th className="r">%/yr</th></tr></thead>
                 <tbody>
                   {books.data!.sleeves!.map((sl) => (
@@ -109,7 +109,7 @@ export default function Desk() {
 
       <Card title="Recent runs" right={<Link href="/runs" className="text-[12px] text-accent hover:underline">All runs →</Link>}>
         {runs.data?.length ? (
-          <table className="grid">
+          <table className="data-table">
             <thead><tr><th>Run</th><th>Week</th><th>Signal → fill</th><th>Status</th><th>Checks</th><th>Computed</th></tr></thead>
             <tbody>
               {runs.data.slice(0, 6).map((r) => (

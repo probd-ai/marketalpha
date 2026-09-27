@@ -81,7 +81,7 @@ export default function Cash() {
 
       <Card title="History (current model version)">
         {flows.data!.length ? (
-          <table className="grid">
+          <table className="data-table">
             <thead><tr><th>Recorded</th><th>Type</th><th className="r">Amount</th><th>Note</th><th>Status</th><th>Applied by</th><th className="r">Units</th><th /></tr></thead>
             <tbody>
               {flows.data!.map((f) => (

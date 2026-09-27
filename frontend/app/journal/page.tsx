@@ -27,7 +27,7 @@ export default function Journal() {
         </select>
       </div>
       <Card>
-        <table className="grid">
+        <table className="data-table">
           <thead><tr><th>When</th><th>Event</th><th>Detail</th></tr></thead>
           <tbody>
             {rows.map((e, i) => (

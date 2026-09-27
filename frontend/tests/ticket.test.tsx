@@ -21,7 +21,8 @@ describe("TicketTable", () => {
     expect(screen.getByText("₹5,000", { selector: "b" })).toBeInTheDocument();
     expect(screen.getByText("₹4,000", { selector: "b" })).toBeInTheDocument();
     expect(screen.getByText("(exit all)")).toBeInTheDocument();
-    const rows = within(screen.getAllByRole("table")[0]).getAllByRole("row");
+    expect(screen.getAllByRole("table")[0]).toHaveClass("data-table");
+  const rows = within(screen.getAllByRole("table")[0]).getAllByRole("row");
     expect(rows[1]).toHaveTextContent("SELL");
   });
 });

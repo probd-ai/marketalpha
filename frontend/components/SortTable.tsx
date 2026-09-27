@@ -29,7 +29,7 @@ export function SortTable<T>({ rows, columns, initialSort, rowKey, empty = "Noth
   if (!rows.length) return <div className="py-6 text-center text-muted">{empty}</div>;
   return (
     <div className="overflow-x-auto">
-      <table className="grid">
+      <table className="data-table">
         <thead>
           <tr>
             {columns.map((c) => (

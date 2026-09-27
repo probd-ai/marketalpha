@@ -116,7 +116,7 @@ export default function RunReview() {
       </div>
 
       <Card title="Fund on the signal day">
-        <table className="grid">
+        <table className="data-table">
           <thead><tr><th>Sleeve</th><th className="r">Target</th><th className="r">Weight</th><th className="r">Value</th><th className="r">Holdings</th></tr></thead>
           <tbody>
             {r.books.map((b) => (

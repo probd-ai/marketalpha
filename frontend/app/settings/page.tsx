@@ -98,7 +98,7 @@ export default function Settings() {
         {c.rebalance_months.length === 0 && <div className="mt-2 text-bad">Choose at least one month.</div>}
       </Card>
       <Card title={`Sleeves · weights total ${(wsum * 100).toFixed(1)}%`}>
-        <table className="grid">
+        <table className="data-table">
           <thead><tr><th>Sleeve</th><th>Rule set</th><th>Universe / instrument</th><th>Parameters</th><th className="r">Weight %</th><th className="r">Capital</th></tr></thead>
           <tbody>
             {c.sleeves.map((s, i) => (

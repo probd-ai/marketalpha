@@ -24,7 +24,7 @@ export function TicketTable({ lines, extra }: { lines: TicketLine[]; extra?: (l:
           <div key={s}>
             <div className="mb-1 text-[12.5px] font-semibold uppercase tracking-wide text-ink-2">{s} · {rows.length} line{rows.length > 1 ? "s" : ""}</div>
             <div className="overflow-x-auto">
-              <table className="grid">
+              <table className="data-table">
                 <thead>
                   <tr><th>#</th><th>Side</th><th>Symbol</th><th className="r">Qty</th><th className="r">Ref price</th><th className="r">Limit</th>
                     <th className="r">Value</th><th>Why</th>{extra && <th>Execution</th>}</tr>

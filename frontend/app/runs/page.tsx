@@ -15,7 +15,7 @@ export default function Runs() {
     <div className="flex flex-col gap-4">
       <h1 className="text-[20px] font-semibold">Runs</h1>
       <Card>
-        <table className="grid">
+        <table className="data-table">
           <thead><tr><th>Run</th><th>Model v</th><th>Week</th><th>Signal</th><th>Fill</th><th>Rebalance</th><th>Status</th><th>Checks</th><th>Computed</th><th>Published</th></tr></thead>
           <tbody>
             {q.data!.map((r) => (
