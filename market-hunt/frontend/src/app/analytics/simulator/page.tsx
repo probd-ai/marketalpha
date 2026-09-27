@@ -58,11 +58,18 @@ interface SimulationConfig {
   rebalanceType: 'equal_weight' | 'skewed'; // Allocation method
   universe: string; // Dynamic universe from database
   benchmarkSymbol?: string; // Optional custom benchmark symbol
-  maxHoldings: number; // Maximum number of stocks in portfolio
-  useAllEligible: boolean; // If true, hold all eligible stocks (ignore maxHoldings)
-  momentumRanking: '20_day_return' | 'price_roc_22d' | 'price_roc_66d' | 'price_roc_222d' | 'risk_adjusted' | 'technical' |
+  maxHoldings: number; // Maximum number of stocks in portfolio (ignored when momentumRanking === 'none')
+  // 'none' = no rank cut: hold every name that reaches this stage (replaces the old
+  // "use all eligible" checkbox, so the cap and the ranker can no longer contradict).
+  momentumRanking: 'none' |
+                   '20_day_return' | 'price_roc_22d' | 'price_roc_66d' | 'price_roc_222d' | 'risk_adjusted' | 'technical' |
                    'truevx_roc' | 'short_mean_roc' | 'mid_mean_roc' | 'long_mean_roc' | 'stock_score_roc' |
                    'price_roc_22d_low' | 'price_roc_222d_low'; // Momentum ranking method ("_low" = lowest ROC, buy-the-dip)
+  // Primary filter: an all-time-high / all-time-low band applied AFTER the strategy
+  // filter and BEFORE the momentum ranking. `take` is the master switch.
+  primaryFilterTake: 'none' | 'top50' | 'bottom50' | 'all';
+  primaryFilterMetric: 'ath' | 'atl';
+  primaryFilterBand: number; // percent distance from the extreme
   startDate: string;
   endDate: string;
   pointInTimeMembership: boolean; // Gate universe to index membership as-of each rebalance (survivorship-bias-free)
@@ -450,9 +457,11 @@ const AnalyticsSimulatorPage = () => {
     rebalanceType: 'equal_weight', // Default to equal weight allocation
     universe: 'NIFTY50', // Default fallback, will be updated when universes load
     benchmarkSymbol: '50 EQL Wgt', // Default to Equal Weight Index
-    maxHoldings: 10, // Default maximum holdings
-    useAllEligible: false, // Default: use top-N selection
-    momentumRanking: '20_day_return', // Default momentum ranking method
+    maxHoldings: 10, // Default maximum holdings (applies once a ranking method is chosen)
+    momentumRanking: 'none', // Default: no rank cut — hold all eligible
+    primaryFilterTake: 'none', // Default: primary filter off
+    primaryFilterMetric: 'ath',
+    primaryFilterBand: 5,
     startDate: '2020-01-01',
     endDate: '2025-08-30',
     pointInTimeMembership: false, // Default: current-snapshot universe (survivorship-biased)
@@ -764,8 +773,10 @@ const AnalyticsSimulatorPage = () => {
       universe: simulationConfig.universe,
       benchmarkSymbol: simulationConfig.benchmarkSymbol || '50 EQL Wgt', // Always include benchmark
       maxHoldings: simulationConfig.maxHoldings.toString(),
-      useAllEligible: simulationConfig.useAllEligible.toString(),
       momentumRanking: simulationConfig.momentumRanking,
+      primaryFilterTake: simulationConfig.primaryFilterTake,
+      primaryFilterMetric: simulationConfig.primaryFilterMetric,
+      primaryFilterBand: simulationConfig.primaryFilterBand.toString(),
       startDate: simulationConfig.startDate,
       endDate: simulationConfig.endDate,
       pointInTimeMembership: simulationConfig.pointInTimeMembership.toString(),
@@ -1159,7 +1170,8 @@ const AnalyticsSimulatorPage = () => {
                     <strong> Portfolio Base Value</strong> is the capital (split into tranches),
                     and <strong>Universe, dates, Point-in-time</strong> apply.
                     <strong> Max Holdings</strong> caps concurrent positions and <strong>Momentum Ranking</strong> ranks
-                    new entries when the cap is hit (use “all eligible” for no cap).
+                    new entries when the cap is hit (set it to “None” for no cap).
+                    <strong> Primary Filter does not apply</strong> to waves — leave it on “None”.
                     <strong> Rebalance Frequency/Date/Type do not apply</strong> to waves (the wave cadence governs timing).
                   </p>
                 </div>
@@ -1402,67 +1414,142 @@ const AnalyticsSimulatorPage = () => {
                 </div>
               </div>
 
+              {/* Primary Filter — runs AFTER the strategy filter, BEFORE momentum ranking */}
+              <div>
+                <h3 className="text-lg font-medium text-gray-900 mb-1">Primary Filter</h3>
+                <p className="text-xs text-gray-500 mb-4">
+                  Applied to everything the strategy filter passed — current holdings included —
+                  before momentum ranking picks the top N.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Filter
+                    </label>
+                    <select
+                      value={simulationConfig.primaryFilterTake}
+                      onChange={(e) => setSimulationConfig({
+                        ...simulationConfig,
+                        primaryFilterTake: e.target.value as SimulationConfig['primaryFilterTake']
+                      })}
+                      className="w-full p-2 border border-gray-300 rounded-md"
+                    >
+                      <option value="none">None — no primary filter</option>
+                      <option value="all">All within the band</option>
+                      <option value="top50">Top 50% of the band</option>
+                      <option value="bottom50">Bottom 50% of the band</option>
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {simulationConfig.primaryFilterTake === 'none'
+                        ? 'Stage skipped entirely'
+                        : simulationConfig.primaryFilterTake === 'all'
+                          ? 'Every name inside the band'
+                          : simulationConfig.primaryFilterTake === 'top50'
+                            ? (simulationConfig.primaryFilterMetric === 'ath'
+                                ? 'The half nearest the high'
+                                : 'The half nearest the low')
+                            : (simulationConfig.primaryFilterMetric === 'ath'
+                                ? 'The half furthest below the high'
+                                : 'The half furthest above the low')}
+                    </p>
+                  </div>
+
+                  <div className={simulationConfig.primaryFilterTake === 'none' ? 'opacity-40 pointer-events-none' : ''}>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Metric
+                    </label>
+                    <select
+                      value={simulationConfig.primaryFilterMetric}
+                      disabled={simulationConfig.primaryFilterTake === 'none'}
+                      onChange={(e) => setSimulationConfig({
+                        ...simulationConfig,
+                        primaryFilterMetric: e.target.value as SimulationConfig['primaryFilterMetric']
+                      })}
+                      className="w-full p-2 border border-gray-300 rounded-md"
+                    >
+                      <option value="ath">All Time High</option>
+                      <option value="atl">All Time Low</option>
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {simulationConfig.primaryFilterMetric === 'ath'
+                        ? 'Leaders: trading at or near their all-time-high close'
+                        : 'Beaten-down: trading at or near their all-time-low close'}
+                    </p>
+                  </div>
+
+                  <div className={simulationConfig.primaryFilterTake === 'none' ? 'opacity-40 pointer-events-none' : ''}>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Band (%)
+                    </label>
+                    <Input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.5"
+                      value={simulationConfig.primaryFilterBand}
+                      disabled={simulationConfig.primaryFilterTake === 'none'}
+                      onChange={(e) => setSimulationConfig({
+                        ...simulationConfig,
+                        primaryFilterBand: Math.max(0, parseFloat(e.target.value) || 0)
+                      })}
+                      className="w-full"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      {simulationConfig.primaryFilterMetric === 'ath'
+                        ? `Keep names within ${simulationConfig.primaryFilterBand}% below their all-time high`
+                        : `Keep names within ${simulationConfig.primaryFilterBand}% above their all-time low`}
+                      {simulationConfig.primaryFilterBand === 0 && ' — 0% demands a fresh extreme'}
+                    </p>
+                  </div>
+                </div>
+                {simulationConfig.primaryFilterTake !== 'none' && selectedStrategy?.wave && (
+                  <p className="mt-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                    ⚠ The primary filter is stateless-path only — a wave strategy will reject the run
+                    rather than ignore it. Set Filter to “None” to run this wave.
+                  </p>
+                )}
+              </div>
+
               {/* Portfolio Limit Settings */}
               <div>
                 <h3 className="text-lg font-medium text-gray-900 mb-4">Portfolio Limit Settings</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
+                  <div className={simulationConfig.momentumRanking === 'none' ? 'opacity-40 pointer-events-none' : ''}>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                       Max Holdings
                     </label>
-                    <div className="flex items-center gap-2 mb-2">
-                      <input
-                        type="checkbox"
-                        id="useAllEligible"
-                        checked={simulationConfig.useAllEligible}
-                        onChange={(e) => setSimulationConfig({
-                          ...simulationConfig,
-                          useAllEligible: e.target.checked
-                        })}
-                        className="h-4 w-4 rounded border-gray-300 text-indigo-600"
-                      />
-                      <label htmlFor="useAllEligible" className="text-sm text-gray-700">
-                        Use all eligible stocks from strategy
-                      </label>
-                    </div>
-                    {!simulationConfig.useAllEligible && (
-                      <>
-                        <Input
-                          type="number"
-                          min="1"
-                          max="500"
-                          value={simulationConfig.maxHoldings}
-                          onChange={(e) => setSimulationConfig({
-                            ...simulationConfig,
-                            maxHoldings: parseInt(e.target.value) || 10
-                          })}
-                          className="w-full"
-                        />
-                        <p className="text-xs text-gray-500 mt-1">
-                          Top N stocks ranked by momentum to hold
-                        </p>
-                      </>
-                    )}
-                    {simulationConfig.useAllEligible && (
-                      <p className="text-xs text-gray-500 mt-1">
-                        All stocks passing the strategy filter will be held (no rank cutoff)
-                      </p>
-                    )}
+                    <Input
+                      type="number"
+                      min="1"
+                      max="500"
+                      value={simulationConfig.maxHoldings}
+                      disabled={simulationConfig.momentumRanking === 'none'}
+                      onChange={(e) => setSimulationConfig({
+                        ...simulationConfig,
+                        maxHoldings: parseInt(e.target.value) || 10
+                      })}
+                      className="w-full"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      {simulationConfig.momentumRanking === 'none'
+                        ? 'Not used — ranking is “None”, so every eligible name is held'
+                        : 'Top N stocks ranked by momentum to hold'}
+                    </p>
                   </div>
-                  
-                  <div className={simulationConfig.useAllEligible ? 'opacity-40 pointer-events-none' : ''}>
+
+                  <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                       Momentum Ranking Method
                     </label>
                     <select
                       value={simulationConfig.momentumRanking}
-                      disabled={simulationConfig.useAllEligible}
                       onChange={(e) => setSimulationConfig({
                         ...simulationConfig,
                         momentumRanking: e.target.value as SimulationConfig['momentumRanking']
                       })}
                       className="w-full p-2 border border-gray-300 rounded-md"
                     >
+                      <option value="none">None — hold all eligible (no rank cut)</option>
                       <optgroup label="Price-Based Momentum">
                         <option value="20_day_return">20-Day Price Return</option>
                         <option value="price_roc_22d">22-Day Price Return</option>
@@ -1484,9 +1571,9 @@ const AnalyticsSimulatorPage = () => {
                       </optgroup>
                     </select>
                     <p className="text-xs text-gray-500 mt-1">
-                      {simulationConfig.useAllEligible
-                        ? 'Not used — all eligible stocks are held'
-                        : 'Method used to rank stocks when portfolio limit is exceeded'}
+                      {simulationConfig.momentumRanking === 'none'
+                        ? 'No rank cut — every name passing the filters above is held'
+                        : 'Method used to rank stocks when the portfolio limit is exceeded'}
                     </p>
                   </div>
                 </div>
@@ -1591,7 +1678,11 @@ const AnalyticsSimulatorPage = () => {
                       universe: simulationConfig.universe,
                       benchmarkSymbol: simulationConfig.benchmarkSymbol || '50 EQL Wgt',
                       maxHoldings: simulationConfig.maxHoldings,
-                      momentumRanking: simulationConfig.momentumRanking,
+                      // This sweep varies the top-N, so "no rank cut" has nothing to
+                      // sweep — the endpoint rejects it. Fall back to the default ranker.
+                      momentumRanking: simulationConfig.momentumRanking === 'none'
+                        ? '20_day_return'
+                        : simulationConfig.momentumRanking,
                       startDate: simulationConfig.startDate,
                       endDate: simulationConfig.endDate
                     };

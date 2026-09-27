@@ -907,3 +907,127 @@ async def get_index_distribution_symbols(
         logger.error(f"❌ Failed to get index distribution: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get index distribution: {str(e)}")
 
+
+
+@router.get("/api/analytics/index-ratios")
+async def get_index_ratios(
+    index_symbol: str = "NIFTY500",
+    lookback: Optional[str] = "5Y",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    metric: Optional[str] = "truevx_score",
+    point_in_time: bool = True,
+    include_price: bool = True,
+):
+    """Band-count ratios for an index over time.
+
+    Counts alone depend on how many names the index holds; ratios do not, so they stay
+    comparable across NIFTY50 and NIFTY500MICRO750 and across a rebalance.
+
+    Two things make this fast enough to be interactive where the sibling
+    /index-distribution endpoint is not:
+      * Mongo does the bucketing (one $group with a $switch), so the wire carries one row
+        per (date, band) instead of one document per (symbol, date) -- ~6k rows, not ~560k.
+      * point-in-time membership is applied by splitting the window into the ~20 epochs
+        over which the member set is constant, one indexed query each, rather than
+        filtering symbol-by-symbol per date.
+    """
+    import time
+    from datetime import date as _date, datetime as _dt
+
+    from analytics_ratios import (
+        VALID_METRICS, assemble, band_labels, band_switch,
+        membership_epochs, ratio_keys, resolve_window,
+    )
+
+    t0 = time.time()
+    if metric not in VALID_METRICS:
+        raise HTTPException(status_code=400,
+                            detail=f"Invalid metric. Must be one of: {list(VALID_METRICS)}")
+    if mongo_conn.db is None:
+        raise HTTPException(status_code=500, detail="Database connection not available")
+
+    db = mongo_conn.db
+    lo, hi = resolve_window(lookback, start_date, end_date, _date.today())
+    if lo >= hi:
+        raise HTTPException(status_code=400, detail="start_date must be before end_date")
+    lo_dt, hi_dt = _dt.combine(lo, _dt.min.time()), _dt.combine(hi, _dt.max.time())
+    field = f"$data.{metric}"
+
+    def _group(match):
+        return list(db.indicators.aggregate(
+            [{"$match": match},
+             {"$group": {"_id": {"d": "$date", "b": band_switch(field)}, "n": {"$sum": 1}}}],
+            allowDiskUse=True))
+
+    per_date: dict = {}
+    epochs_used = 0
+    pit_applied = False
+
+    if point_in_time:
+        try:
+            from membership import load_membership, members_as_of
+            intervals = load_membership(db, index_symbol, _date.today())
+            epochs = membership_epochs(intervals, lo, hi, members_as_of)
+        except Exception as exc:                       # no reconstitution series for this index
+            logger.warning(f"index-ratios: no PIT membership for {index_symbol} ({exc}); "
+                           "falling back to current constituents")
+            epochs = []
+        if epochs:
+            pit_applied = True
+            epochs_used = len(epochs)
+            for ep in epochs:
+                rows = _group({"indicator_type": "truevx",
+                               "symbol": {"$in": list(ep.members)},
+                               "date": {"$gte": _dt.combine(ep.start, _dt.min.time()),
+                                        "$lt": _dt.combine(ep.end, _dt.min.time())},
+                               f"data.{metric}": {"$ne": None}})
+                for r in rows:
+                    per_date.setdefault(r["_id"]["d"].strftime("%Y-%m-%d"), {})[r["_id"]["b"]] = r["n"]
+
+    if not pit_applied:
+        members = [d["Symbol"] for d in
+                   db.index_meta.find({"index_name": index_symbol}, {"Symbol": 1})]
+        if not members:
+            return JSONResponse(status_code=404, content={
+                "success": False,
+                "error": f"No stocks found for index: {index_symbol}",
+                "available_indices": await get_available_indices()})
+        for r in _group({"indicator_type": "truevx", "symbol": {"$in": members},
+                         "date": {"$gte": lo_dt, "$lte": hi_dt},
+                         f"data.{metric}": {"$ne": None}}):
+            per_date.setdefault(r["_id"]["d"].strftime("%Y-%m-%d"), {})[r["_id"]["b"]] = r["n"]
+
+    # benchmark price overlay -- the series the indicator is measured against, so the
+    # ratios can be read next to what the market actually did
+    prices, base_symbol = {}, None
+    if include_price:
+        sample = db.indicators.find_one({"indicator_type": "truevx"}, {"base_symbol": 1})
+        base_symbol = (sample or {}).get("base_symbol")
+        if base_symbol:
+            for coll in sorted(c for c in db.list_collection_names() if c.startswith("prices_")):
+                for p in db[coll].find(
+                        {"symbol": base_symbol, "date": {"$gte": lo_dt, "$lte": hi_dt}},
+                        {"_id": 0, "date": 1, "close_price": 1}):
+                    if p.get("close_price") is not None:
+                        prices[p["date"].strftime("%Y-%m-%d")] = {"close": float(p["close_price"])}
+
+    data = assemble(per_date, prices)
+    return JSONResponse(content={
+        "success": True,
+        "index_symbol": index_symbol,
+        "metric": metric,
+        "point_in_time": pit_applied,
+        "point_in_time_requested": point_in_time,
+        "base_symbol": base_symbol,
+        "bands": band_labels(),
+        "ratios": ratio_keys(),
+        "date_range": {"start": lo.isoformat(), "end": hi.isoformat()},
+        "summary": {
+            "date_count": len(data),
+            "epochs": epochs_used,
+            "symbols_latest": data[-1]["total"] if data else 0,
+            "elapsed_ms": round((time.time() - t0) * 1000),
+        },
+        "data": data,
+    })

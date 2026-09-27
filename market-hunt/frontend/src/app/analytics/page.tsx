@@ -83,6 +83,24 @@ const analyticsMenuItems = [
     dataPoints: 'Composed sleeves'
   },
   {
+    id: 'index-ratios',
+    title: 'Index Band Ratios',
+    description: 'Ratios between score bands over time - comparable across indices and across rebalances, where raw counts are not',
+    icon: Activity,
+    route: '/analytics/index-ratios',
+    status: 'active',
+    features: [
+      'Four band ratios: 80-100/60-80, 60-80/40-60, 40-60/20-40, 80-100/20-40',
+      'Point-in-time membership, survivorship-bias-free',
+      'Any metric: TrueVX score, mean short / mid / long',
+      'Benchmark price overlay and log scale',
+      'Server-side bucketing - ~10x faster than the distribution page'
+    ],
+    complexity: 'Intermediate',
+    estimatedTime: 'Seconds',
+    dataPoints: 'Band counts per session'
+  },
+  {
     id: 'index-distribution',
     title: 'Index Score Distribution',
     description: 'Time series analysis of TrueVX score distribution across index constituents over the last 20 years',

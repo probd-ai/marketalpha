@@ -73,15 +73,27 @@ class SimulationParams(BaseModel):
     portfolio_base_value: float = 100000
     rebalance_frequency: str = "monthly"  # 'monthly', 'weekly', 'quarterly', 'dynamic'
     rebalance_date: str = "first"  # 'first', 'last', 'mid'
+    # EXECUTION LAG (research). Shifts every rebalance N trading SESSIONS later.
+    # The backtest ranks on a date's close and fills at that same close, which
+    # cannot happen live — the refresh, the run and the order all come after the
+    # market shut. 0 is the unchanged default and must stay byte-identical.
+    rebalance_offset_sessions: int = 0
     rebalance_type: str = "equal_weight"  # 'equal_weight', 'skewed' - allocation method
     universe: str = "NIFTY50"  # 'NIFTY50', 'NIFTY100', 'NIFTY500'
     benchmark_symbol: Optional[str] = None  # Optional benchmark symbol override
     max_holdings: Optional[int] = None  # Maximum number of stocks; None = all eligible
     momentum_ranking: str = "20_day_return"  # Momentum ranking method - supports:
+    # 'none' — NO rank cut: hold every name that reaches this stage (forces max_holdings=None)
     # Price-based: '20_day_return', 'price_roc_22d', 'price_roc_66d', 'price_roc_222d', 'risk_adjusted', 'technical'
     # Indicator-based: 'truevx_roc', 'short_mean_roc', 'mid_mean_roc', 'long_mean_roc', 'stock_score_roc'
     # Any method + '_low' suffix inverts the ranking (select LOWEST ROC — buy-the-dip),
     # e.g. 'price_roc_22d_low', 'price_roc_222d_low'. Stateless engine only (wave is v1-limited).
+    # ── Primary filter: an all-time-high / all-time-low band applied AFTER the strategy
+    # filter and BEFORE the momentum ranking. See docs/specs/primary-filter-ath-atl.md.
+    primary_filter_take: str = "none"  # master switch: 'none' (off) | 'top50' | 'bottom50' | 'all'
+    # top50 = the half of the band NEAREST the extreme; bottom50 = the half FURTHEST from it
+    primary_filter_metric: str = "ath"  # 'ath' (near the high) | 'atl' (near the low)
+    primary_filter_band: float = 5.0  # band width in percent; 0 = must be AT the extreme
     start_date: str
     end_date: str
     # New brokerage-related parameters
@@ -111,6 +123,37 @@ class SimulationParams(BaseModel):
             raise ValueError("strategy_id is required when wave is not provided")
         return self
 
+    @model_validator(mode="after")
+    def normalize_selection_params(self):
+        """'none' ranking means hold all eligible — it cannot coexist with a cap.
+
+        Coerced rather than rejected: the meaning is fully determined, and older
+        callers (multi-run, saved sleeves) still post max_holdings unconditionally.
+        The engine raises if the two ever reach it disagreeing.
+        """
+        if self.momentum_ranking == "none" and self.max_holdings is not None:
+            logger.info(f"↔ momentum_ranking='none' → dropping max_holdings="
+                        f"{self.max_holdings} (hold all eligible)")
+            self.max_holdings = None
+
+        if self.primary_filter_take not in ("none", "top50", "bottom50", "all"):
+            raise ValueError(
+                f"primary_filter_take must be 'none', 'top50', 'bottom50' or 'all'; "
+                f"got {self.primary_filter_take!r}")
+        if self.primary_filter_metric not in ("ath", "atl"):
+            raise ValueError(
+                f"primary_filter_metric must be 'ath' or 'atl'; "
+                f"got {self.primary_filter_metric!r}")
+        if self.primary_filter_band < 0:
+            raise ValueError(
+                f"primary_filter_band is a distance from the extreme and cannot be "
+                f"negative; got {self.primary_filter_band}")
+        if self.primary_filter_take != "none" and self.wave is not None:
+            raise ValueError(
+                "primary_filter is not supported on the wave engine in v1 — it would be "
+                "silently ignored. Run the stateless path, or set primary_filter_take='none'.")
+        return self
+
 
 class HoldingsMultiParams(BaseModel):
     """Parameters for holdings multi-dimension simulation"""
@@ -122,6 +165,8 @@ class HoldingsMultiParams(BaseModel):
     universe: str = "NIFTY50"
     benchmark_symbol: Optional[str] = None
     base_max_holdings: int = 10  # Base holdings value
+    # 'none' is deliberately NOT accepted here: this endpoint's whole purpose is
+    # sweeping holdings counts, and "no rank cut" has no top-N to sweep.
     momentum_ranking: str = "20_day_return"
     start_date: str
     end_date: str
@@ -130,7 +175,15 @@ class HoldingsMultiParams(BaseModel):
     custom_brokerage_rate: float = 0.0
     portfolio_turnover_estimate: float = 0.5
     multipliers: list[int] = [1, 2, 3, 4]  # Holding size multipliers
-    multipliers: list = [1, 2, 3, 4]  # Multipliers for base_max_holdings
+
+    @model_validator(mode="after")
+    def reject_none_ranking(self):
+        if self.momentum_ranking == "none":
+            raise ValueError(
+                "momentum_ranking='none' holds all eligible names, so there is no top-N "
+                "for this endpoint to sweep. Pick a ranking method, or use /api/simulation/run.")
+        return self
+
 
 @router.post("/api/simulation/strategies")
 async def save_strategy(strategy: Strategy):
@@ -330,6 +383,14 @@ async def run_simulation(params: SimulationParams):
 
         # ── WAVE PATH ──────────────────────────────────────────────────────────
         if effective_wave is not None:
+            # A saved wave strategy routes here even when params.wave is None, so the
+            # primary-filter guard has to be re-checked against the RESOLVED wave.
+            if params.primary_filter_take != "none":
+                raise HTTPException(
+                    status_code=400,
+                    detail="primary_filter is not supported on the wave engine in v1 — it "
+                           "would be silently ignored. Pick a stateless strategy, or set "
+                           "primary_filter_take='none'.")
             logger.info("🌊 Wave block present — routing to wave engine")
             # Capital is a RUN-TIME concern: use the run's Portfolio Base Value as the
             # wave capital (one capital source, consistent with the stateless path so

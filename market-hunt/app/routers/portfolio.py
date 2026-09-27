@@ -142,7 +142,7 @@ def _portfolio_config_hash(p: dict) -> str:
     import hashlib
     import json as _json
     cfg = {
-        "engine_ver": 5,  # bump when engine changes alter results (invalidates cache)
+        "engine_ver": 6,  # bump when engine changes alter results (invalidates cache); 6 = warm-up window
         "total_capital": p.get("total_capital"),
         "pit": p.get("point_in_time_membership", True),
         "benchmark": p.get("benchmark_symbol"),
@@ -226,7 +226,8 @@ def _symbol_meta_for(symbols: set[str]) -> dict:
     return meta
 
 
-async def _compute_portfolio_run(portfolio: dict, inception: str, as_of: str) -> dict:
+async def _compute_portfolio_run(portfolio: dict, inception: str, as_of: str,
+                                 offset_sessions: int = 0) -> dict:
     """Heavy computation extracted from run_portfolio — no DB re-query, pure compute."""
     from indicator_data_manager import IndicatorDataManager
     from stock_data_manager import StockDataManager
@@ -265,6 +266,8 @@ async def _compute_portfolio_run(portfolio: dict, inception: str, as_of: str) ->
             stock_gate=bool(sleeve.get("stock_gate", False)),
             portfolio_gate=bool(sleeve.get("portfolio_gate", False)),
         )
+        if offset_sessions:
+            params.rebalance_offset_sessions = int(offset_sessions)
 
         # Resolve the universe symbols exactly as /api/simulation/run does.
         membership = None
@@ -324,16 +327,20 @@ async def _compute_portfolio_run(portfolio: dict, inception: str, as_of: str) ->
     return sanitize_for_json({"success": True, **composed})
 
 
-def _compute_portfolio_run_sync(portfolio: dict, inception: str, as_of: str) -> dict:
+def _compute_portfolio_run_sync(portfolio: dict, inception: str, as_of: str,
+                                offset_sessions: int = 0) -> dict:
     # Runs the async compute in a fresh event loop on a worker thread, so the
     # CPU-bound simulation never blocks the server's main event loop.
-    return asyncio.run(_compute_portfolio_run(portfolio, inception, as_of))
+    return asyncio.run(_compute_portfolio_run(portfolio, inception, as_of,
+                                              offset_sessions))
 
 
 async def _run_portfolio_job(job_id: str, portfolio: dict, inception: str, as_of: str,
-                             cache_key: dict | None = None) -> None:
+                             cache_key: dict | None = None,
+                             offset_sessions: int = 0) -> None:
     try:
-        result = await asyncio.to_thread(_compute_portfolio_run_sync, portfolio, inception, as_of)
+        result = await asyncio.to_thread(_compute_portfolio_run_sync, portfolio,
+                                         inception, as_of, offset_sessions)
         result["cached"] = False
         result["computed_at"] = datetime.now().isoformat()
         if cache_key:
@@ -360,7 +367,15 @@ async def get_portfolio_run_status(job_id: str):
 
 @router.post("/api/portfolio/{portfolio_id}/run")
 async def run_portfolio(portfolio_id: str, end_date: str | None = None,
-                        start_date: str | None = None, force: bool = False):
+                        start_date: str | None = None, force: bool = False,
+                        offset_sessions: int = 0):
+    """`offset_sessions` shifts every rebalance N trading sessions later.
+
+    RESEARCH KNOB. The backtest ranks on a date's close and fills at that same
+    close, which cannot happen live — the refresh, the run and the order all come
+    after the market shut. Offsets of 1-3 measure what trading a session or two
+    later actually costs. 0 is the stored, unchanged behaviour.
+    """
     if mongo_conn.db is None:
         raise HTTPException(status_code=500, detail="Database connection not available")
     p = mongo_conn.db.portfolios.find_one({"id": portfolio_id})
@@ -386,7 +401,13 @@ async def run_portfolio(portfolio_id: str, end_date: str | None = None,
 
     job_id = f"run_{int(datetime.now().timestamp() * 1000)}_{portfolio_id[-6:]}"
 
-    if not force:
+    # A research run (offset_sessions != 0) is EPHEMERAL: never read from the cache
+    # and never written to it. Persisting it would make it the newest run, and every
+    # live read — reconciliation target, sync plan, last-run page — takes the newest.
+    # A lag-3 sweep silently becoming the book we place orders against is the failure
+    # this prevents, and preventing it by construction beats filtering it out in four
+    # separate read paths.
+    if not force and not offset_sessions:
         hit = mongo_conn.db.portfolio_runs.find_one(
             {"portfolio_id": portfolio_id, "config_hash": config_hash,
              "inception": inception, "end_key": end_key}, {"_id": 0})
@@ -401,7 +422,10 @@ async def run_portfolio(portfolio_id: str, end_date: str | None = None,
 
     _job_set(job_id, status="running", result=None, error=None)
     _prune_run_jobs()
-    asyncio.create_task(_run_portfolio_job(job_id, p, inception, as_of, cache_key))
+    if offset_sessions:
+        cache_key = None            # ephemeral: compute, return, store nothing
+    asyncio.create_task(_run_portfolio_job(job_id, p, inception, as_of, cache_key,
+                                           offset_sessions))
     return JSONResponse(status_code=202, content={"success": True, "job_id": job_id,
                                                   "status": "running", "cached": False})
 
@@ -575,6 +599,14 @@ def _preview_sleeve_sync(sleeve: dict, pit: bool, current_holdings: list[str]) -
     pool = sorted(set(q_syms) | set(current_holdings))
     scored = sorted(((s, score(s)) for s in pool), key=lambda x: -x[1])
     cap = sleeve.get("max_holdings")
+    if method == "none":
+        # 'none' = hold all eligible. No scorer implements it, so every name scores
+        # 0.0 and a cap would silently hand back an ALPHABETICAL top-N. Drop the cap
+        # rather than publish a fake selection. Matches SimulationParams' coercion.
+        if cap:
+            logger.info(f"↔ sleeve {sleeve.get('id')}: momentum_ranking='none' → "
+                        f"ignoring max_holdings={cap} (hold all eligible)")
+        cap = None
     selected = [s for s, _ in (scored[:int(cap)] if cap else scored)]
     scores = dict(scored)
 
@@ -730,12 +762,15 @@ async def preview_portfolio_pdf(portfolio_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Broker connectivity — READ-ONLY endpoints (holdings / funds / profile).
+# Broker connectivity — reads (holdings / funds / profile) plus the plan-scoped
+# execution verbs in app/routers/broker.py.
 # Security: no credentials accepted or returned over HTTP except the Kite
 # request_token exchange (one-time, server-side secret). Guard: when
 # MH_API_TOKEN is set, every /api/broker/* call must carry X-API-Key; when
-# unset (local dev), only localhost clients are allowed. Order placement is
-# deliberately NOT implemented (Stage 2 requires explicit human approval flow).
+# unset (local dev), only localhost clients are allowed.
+# ⚠ Order placement IS implemented (Stage 2 shipped). No endpoint accepts a
+# caller-supplied symbol/quantity/price — orders are built only from an approved
+# sync-plan, behind the kill switch, caps, market hours and dry-run default.
 # ---------------------------------------------------------------------------
 import hmac as _hmac
 import os

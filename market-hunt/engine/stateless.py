@@ -87,6 +87,32 @@ def calculate_monthly_metrics(daily_results, base_value):
     }
 
 
+# Longest ranking lookback is price_roc_222d (300 calendar days, see calculate_stock_momentum_fast),
+# plus a margin for holidays. Data is loaded from here so the FIRST rebalance ranks on real history.
+WARMUP_CALENDAR_DAYS = 320
+
+
+def warmup_start(start_date) -> datetime:
+    """Where to start loading prices/indicators so day-one lookbacks are complete.
+
+    Without it every symbol's window on the first rebalance held one bar, momentum was 0.0 for
+    all, and the stable sort picked the qualified names alphabetically (engine defect #3).
+    """
+    if isinstance(start_date, str):
+        start_date = datetime.strptime(start_date, "%Y-%m-%d")
+    return start_date - timedelta(days=WARMUP_CALENDAR_DAYS)
+
+
+def simulation_dates(indicator_data: dict, price_data: dict, start_date: str,
+                     end_date: str | None = None) -> list:
+    """Sessions the simulation TRADES on: both feeds present, inside [start_date, end_date].
+
+    Warm-up rows loaded before start_date feed the lookbacks but are never traded.
+    """
+    return [d for d in sorted(set(indicator_data) & set(price_data))
+            if d >= start_date and (end_date is None or d <= end_date)]
+
+
 def build_price_series(price_data_history: dict) -> dict:
     """Precompute, once, per-symbol ascending (dates, closes) parallel arrays.
 
@@ -121,6 +147,136 @@ def build_indicator_series(indicator_data_history) -> dict:
             entry[0].append(d)
             entry[1].append(data)
     return series
+
+
+# ── Primary filter (all-time-high / all-time-low band) ───────────────────────
+# Stage between the strategy filter and the momentum ranking. See
+# docs/specs/primary-filter-ath-atl.md for the full contract.
+
+PRIMARY_FILTER_METRICS = ("ath", "atl")
+PRIMARY_FILTER_TAKES = ("none", "top50", "bottom50", "all")
+
+
+def build_extreme_series(price_data_history: dict, seed: dict) -> dict:
+    """Running all-time (high, low) of CLOSE per symbol, keyed by date.
+
+    Returns {date_str: {symbol: (ath, atl)}} — the extremes as they stood at the
+    END of that session, so a rebalance on that date reads its own close but
+    never a later one.
+
+    `seed` is {symbol: (hi, lo)} over every bar BEFORE the simulation window; it
+    is what makes these all-time rather than window-time extremes. A symbol with
+    no seed (listed after start_date) simply starts from its first in-window bar.
+
+    A symbol missing on a date keeps the extremes it already had — a data gap
+    must not reset a stock's history.
+    """
+    series: dict = {}
+    running: dict = {s: (float(hi), float(lo)) for s, (hi, lo) in (seed or {}).items()}
+    for date_str in sorted(price_data_history.keys()):
+        for symbol, prices in price_data_history[date_str].items():
+            close = prices.get("close_price")
+            if close is None:
+                continue
+            close = float(close)
+            prev = running.get(symbol)
+            running[symbol] = ((close, close) if prev is None
+                               else (max(prev[0], close), min(prev[1], close)))
+        # Snapshot every symbol seen so far, not just today's — a name that did
+        # not print today is still holding its extremes.
+        series[date_str] = dict(running)
+    return series
+
+
+def fetch_pre_window_extremes(db, symbols: list, start_date: datetime) -> dict:
+    """{symbol: (hi, lo)} of CLOSE over every bar strictly BEFORE start_date.
+
+    The engine only loads prices for the simulation window, so this supplies the
+    history that makes an "all-time" high genuinely all-time. Done as one
+    server-side $group per price partition rather than streaming ~20y of bars.
+    """
+    seed: dict = {}
+    if not symbols:
+        return seed
+    pipeline = [
+        {"$match": {"symbol": {"$in": list(symbols)}, "date": {"$lt": start_date}}},
+        {"$group": {"_id": "$symbol",
+                    "hi": {"$max": "$close_price"},
+                    "lo": {"$min": "$close_price"}}},
+    ]
+    for cname in sorted(c for c in db.list_collection_names() if c.startswith("prices_")):
+        for doc in db[cname].aggregate(pipeline):
+            hi, lo = doc.get("hi"), doc.get("lo")
+            if hi is None or lo is None:
+                continue
+            symbol = doc["_id"]
+            hi, lo = float(hi), float(lo)
+            prev = seed.get(symbol)
+            seed[symbol] = (hi, lo) if prev is None else (max(prev[0], hi), min(prev[1], lo))
+    return seed
+
+
+def apply_primary_filter(qualified_stocks: list, day_prices: dict, day_extremes: dict,
+                         *, metric: str, band_percent: float, take: str) -> list:
+    """Keep the names trading within `band_percent` of their all-time extreme.
+
+    metric "ath": keep close/ATH >= 1 - band  (leaders, at or near their high)
+    metric "atl": keep close/ATL <= 1 + band  (the beaten-down, at or near their low)
+
+    take "none"     -> stage disabled; the pool is returned unchanged (identity).
+    take "all"      -> everything inside the band.
+    take "top50"    -> ceil(n/2) of the band NEAREST the extreme
+                       (ATH: highest ratio first; ATL: lowest ratio first).
+    take "bottom50" -> ceil(n/2) of the band FURTHEST from the extreme — the same
+                       ranking reversed. For ATH that is the more beaten-down half
+                       of the near-high names.
+
+    Both halves use ceil(n/2), so on an ODD-sized band they share the median name
+    and are not an exact partition. That keeps the guarantee that a non-empty band
+    never selects zero, which matters more here than exact complementarity.
+
+    A symbol with no price, no extreme, or a non-positive extreme is DROPPED.
+    It cannot be ranked honestly, and scoring it 0 would let an unpriced name
+    occupy a slot. Ties break on symbol so a run is reproducible.
+    """
+    if take == "none":
+        return qualified_stocks
+    if take not in PRIMARY_FILTER_TAKES:
+        raise ValueError(
+            f"primary filter: unknown take {take!r}; expected one of {PRIMARY_FILTER_TAKES}")
+    if metric not in PRIMARY_FILTER_METRICS:
+        raise ValueError(
+            f"primary filter: unknown metric {metric!r}; expected one of {PRIMARY_FILTER_METRICS}")
+
+    band = float(band_percent) / 100.0
+    is_ath = metric == "ath"
+
+    scored = []
+    for stock in qualified_stocks:
+        symbol = stock["symbol"]
+        px = day_prices.get(symbol)
+        ext = day_extremes.get(symbol)
+        if not px or ext is None:
+            continue
+        close = px.get("close_price")
+        extreme = ext[0] if is_ath else ext[1]
+        if close is None or not extreme or extreme <= 0:
+            continue
+        ratio = float(close) / float(extreme)
+        if (ratio >= 1.0 - band) if is_ath else (ratio <= 1.0 + band):
+            scored.append((ratio, symbol, stock))
+
+    if take == "all":
+        return [s for _, _, s in scored]
+
+    # Rank by distance from the extreme, then ceil(n/2) — never 0 from a non-empty band.
+    # "Nearest" is the HIGHEST close/ATH but the LOWEST close/ATL, and bottom50 reverses
+    # whichever of those applies, so the sort direction is one xor of the two flags.
+    nearest_first = take == "top50"
+    descending = is_ath == nearest_first
+    scored.sort(key=lambda t: (-t[0], t[1]) if descending else (t[0], t[1]))
+    keep = -(-len(scored) // 2)
+    return [s for _, _, s in scored[:keep]]
 
 
 def calculate_stock_momentum_fast(price_sym, indicator_sym, current_date_obj, method):
@@ -456,8 +612,18 @@ async def select_top_stocks_by_momentum(qualified_stocks: list, current_holdings
     Select top stocks based on momentum ranking when portfolio limit is exceeded.
     A momentum_method with an "_low" suffix inverts the ranking: the LOWEST-ROC
     names are selected (buy-the-dip flavor), e.g. "price_roc_22d_low".
+
+    momentum_method "none" means NO ranking — hold everything that reached this
+    stage — and is therefore incompatible with a max_holdings cap: no scorer
+    implements "none", so every candidate would score 0.0 and the cap would
+    silently return an ALPHABETICAL top-N that looks like a real selection.
+
     Returns: (selected_stocks, added_stocks, removed_stocks)
     """
+    if momentum_method == "none" and max_holdings is not None:
+        raise ValueError(
+            f"momentum_ranking='none' means hold all eligible names, but max_holdings="
+            f"{max_holdings} asks for a cut. Set a real ranking method, or drop the cap.")
     ascending = momentum_method.endswith("_low")
     if ascending:
         momentum_method = momentum_method[: -len("_low")]
@@ -465,10 +631,12 @@ async def select_top_stocks_by_momentum(qualified_stocks: list, current_holdings
         # If no limit (all eligible), skip ranking entirely
         total_candidates = len(qualified_stocks) + len(current_holdings)
         if max_holdings is None or total_candidates <= max_holdings:
-            # Add all qualified stocks that aren't already held
-            new_stocks = [stock for stock in qualified_stocks
-                         if stock["symbol"] not in current_holdings]
-            return qualified_stocks, new_stocks, []
+            # Add all qualified stocks that aren't already held. `added` is a list of
+            # SYMBOLS — same contract as the ranked path below, which the day result
+            # ("new_added") and the UI's New Additions panel both read as strings.
+            new_symbols = [stock["symbol"] for stock in qualified_stocks
+                           if stock["symbol"] not in current_holdings]
+            return qualified_stocks, new_symbols, []
         
         # Get all candidate stocks (current holdings + newly qualified)
         all_candidates = []
@@ -571,11 +739,13 @@ async def run_strategy_simulation_debug(data_manager, strategy, universe_symbols
         start_date = datetime.strptime(params.start_date, "%Y-%m-%d")
         end_date = datetime.strptime(params.end_date, "%Y-%m-%d")
         
+        load_from = warmup_start(start_date)   # lookback history for the first rebalance
+
         # Get indicator data (simplified for debug)
         indicator_query = {
             "indicator_type": "truevx",
             "symbol": {"$in": universe_symbols},
-            "date": {"$gte": start_date, "$lte": end_date}
+            "date": {"$gte": load_from, "$lte": end_date}
         }
         
         indicator_data = {}
@@ -601,7 +771,7 @@ async def run_strategy_simulation_debug(data_manager, strategy, universe_symbols
             for symbol in universe_symbols:
                 symbol_prices = await stock_manager.get_price_data(
                     symbol=symbol,
-                    start_date=start_date,
+                    start_date=load_from,
                     end_date=end_date,
                     limit=10000,  # Increased limit for full date range
                     sort_order=1
@@ -622,9 +792,11 @@ async def run_strategy_simulation_debug(data_manager, strategy, universe_symbols
         current_holdings = {}
         debug_results = []
         
-        # Get trading dates
-        dates = sorted(set(indicator_data.keys()) & set(price_data.keys()))
-        rebalance_dates = get_rebalance_dates(dates, params.rebalance_frequency, params.rebalance_date)
+        # Get trading dates (warm-up rows are lookback-only)
+        dates = simulation_dates(indicator_data, price_data, params.start_date, params.end_date)
+        rebalance_dates = get_rebalance_dates(
+            dates, params.rebalance_frequency, params.rebalance_date,
+            int(getattr(params, "rebalance_offset_sessions", 0) or 0))
         
         logger.info(f"🧪 DEBUG: Processing {len(dates)} dates")
         logger.info(f"🧪 DEBUG: Rebalance dates: {list(rebalance_dates)}")
@@ -1157,20 +1329,22 @@ async def run_strategy_simulation(data_manager, strategy, universe_symbols, para
         logger.info(f"🔍 Starting simulation with {len(universe_symbols)} symbols")
         indicators_coll = data_manager.db[data_manager.indicators_collection]
         
-        # Parse date range
+        # Parse date range. Data loads from load_from (warm-up) so the first rebalance's
+        # lookbacks are complete; trading still starts at start_date (simulation_dates).
         start_date = datetime.strptime(params.start_date, "%Y-%m-%d")
         end_date = datetime.strptime(params.end_date, "%Y-%m-%d")
-        
+        load_from = warmup_start(start_date)
+
         # Get all indicator data for the universe and date range
         indicator_query = {
             "indicator_type": "truevx",
             "symbol": {"$in": universe_symbols},
             "date": {
-                "$gte": start_date,
+                "$gte": load_from,
                 "$lte": end_date
             }
         }
-        
+
         # Process indicator data by date
         indicator_data = {}
         cursor = indicators_coll.find(indicator_query).sort("date", 1)
@@ -1178,7 +1352,7 @@ async def run_strategy_simulation(data_manager, strategy, universe_symbols, para
             date_str = doc["date"].strftime('%Y-%m-%d')
             if date_str not in indicator_data:
                 indicator_data[date_str] = {}
-            
+
             indicator_data[date_str][doc["symbol"]] = {
                 "symbol": doc["symbol"],
                 "truevx_score": doc["data"].get("truevx_score") or 0,
@@ -1190,7 +1364,7 @@ async def run_strategy_simulation(data_manager, strategy, universe_symbols, para
         # Process price data by date using StockDataManager
         from stock_data_manager import StockDataManager
         price_data = {}
-        
+
         logger.info(f"🔄 Loading price data for {len(universe_symbols)} symbols (concurrent)")
 
         async with StockDataManager() as stock_manager:
@@ -1200,7 +1374,7 @@ async def run_strategy_simulation(data_manager, strategy, universe_symbols, para
                 async with _price_sem:
                     return sym, await stock_manager.get_price_data(
                         symbol=sym,
-                        start_date=start_date,
+                        start_date=load_from,
                         end_date=end_date,
                         limit=10000,
                         sort_order=1,
@@ -1244,6 +1418,21 @@ async def run_strategy_simulation(data_manager, strategy, universe_symbols, para
                                            params.gate_fib_lookback, params.gate_fib_level)
             del _sg_series
             logger.info(f"🚦 Stock-level DynamicFib gate precomputed for {len(stock_gate_on)} symbols")
+
+        # ── Primary filter (all-time-high / all-time-low band) ───────────────
+        # Runs between the strategy filter and the momentum ranking. All-time
+        # extremes need history from before the window, so the in-window running
+        # max/min is seeded with one server-side aggregation over the partitions.
+        _pf_take = getattr(params, "primary_filter_take", "none") or "none"
+        _pf_metric = getattr(params, "primary_filter_metric", "ath") or "ath"
+        _pf_band = float(getattr(params, "primary_filter_band", 5.0) or 0.0)
+        extreme_series: dict = {}
+        pf_before_total = pf_after_total = pf_sessions = pf_days_emptied = 0
+        if _pf_take != "none":
+            _pf_seed = fetch_pre_window_extremes(data_manager.db, universe_symbols, start_date)
+            extreme_series = build_extreme_series(price_data, _pf_seed)
+            logger.info(f"🎯 Primary filter active: {_pf_metric.upper()} band {_pf_band:.2f}% "
+                        f"take={_pf_take} (pre-window extremes for {len(_pf_seed)} symbols)")
 
 
         # Initialize simulation state
@@ -1353,9 +1542,11 @@ async def run_strategy_simulation(data_manager, strategy, universe_symbols, para
                 logger.info(f"🚦 Regime gate active: {gate_symbol} vs {params.gate_sma}d SMA "
                             f"({sum(1 for v in gate_on.values() if not v)} risk-off sessions in range)")
 
-        # Get all trading dates where we have both indicator and price data
-        dates = sorted(set(indicator_data.keys()) & set(price_data.keys()))
-        rebalance_dates = get_rebalance_dates(dates, params.rebalance_frequency, params.rebalance_date)
+        # Trading dates: both feeds present, on/after start_date (warm-up rows are lookback-only)
+        dates = simulation_dates(indicator_data, price_data, params.start_date, params.end_date)
+        rebalance_dates = get_rebalance_dates(
+            dates, params.rebalance_frequency, params.rebalance_date,
+            int(getattr(params, "rebalance_offset_sessions", 0) or 0))
         
         logger.info(f"📅 Processing {len(dates)} trading days: {dates[:5]}...{dates[-5:] if len(dates) > 5 else ''}")
         logger.info(f"📊 Sample price data for first date: {list(price_data.get(dates[0], {}).keys())[:3] if dates else 'No dates'}")
@@ -1420,6 +1611,22 @@ async def run_strategy_simulation(data_manager, strategy, universe_symbols, para
                 qualified_stocks = [s for s in qualified_stocks
                                     if stock_gate_on.get(s["symbol"], {}).get(date_str, True)]
                 qualified_symbols = [s["symbol"] for s in qualified_stocks]
+
+            # Primary filter: keep only names inside the ATH/ATL band (optionally
+            # its better half). Applied to the WHOLE pool, current holdings
+            # included — a holding that leaves the band ranks out and is sold at
+            # the next rebalance, exactly as the strategy filter already works.
+            if _pf_take != "none":
+                _pf_before = len(qualified_stocks)
+                qualified_stocks = apply_primary_filter(
+                    qualified_stocks, day_prices, extreme_series.get(date_str, {}),
+                    metric=_pf_metric, band_percent=_pf_band, take=_pf_take)
+                qualified_symbols = [s["symbol"] for s in qualified_stocks]
+                pf_sessions += 1
+                pf_before_total += _pf_before
+                pf_after_total += len(qualified_stocks)
+                if _pf_before and not qualified_stocks:
+                    pf_days_emptied += 1
 
             # Book-level gates: index regime gate and/or portfolio-curve self-gate.
             # Risk-off empties the eligible set (forcing a flatten if anything is
@@ -2097,7 +2304,17 @@ async def run_strategy_simulation(data_manager, strategy, universe_symbols, para
                 "stop_loss_exits": stop_loss_exit_count,
                 "regime_gate": ({"gate_symbol": params.gate_symbol or "Nifty 500",
                                  "gate_sma": params.gate_sma}
-                                if params.regime_gate else None)
+                                if params.regime_gate else None),
+                # Pool sizes are per SESSION (every simulation day the stage ran),
+                # not per rebalance — days_emptied is the honest signal that the
+                # band is too tight and the book is sitting in cash.
+                "primary_filter": ({"metric": _pf_metric,
+                                    "band_percent": _pf_band,
+                                    "take": _pf_take,
+                                    "avg_pool_before": round(pf_before_total / pf_sessions, 1),
+                                    "avg_pool_after": round(pf_after_total / pf_sessions, 1),
+                                    "days_emptied": pf_days_emptied}
+                                   if _pf_take != "none" and pf_sessions else None)
             }
         })
         
@@ -2238,7 +2455,7 @@ def calculate_current_portfolio_value(current_holdings, day_prices, cash_balance
 
     return total_value
 
-def get_rebalance_dates(dates, frequency, date_type):
+def get_rebalance_dates(dates, frequency, date_type, offset_sessions=0):
     """Generate rebalance dates based on frequency and date type.
 
     Completed periods: pick first/mid/last of the period's loaded trading days
@@ -2306,6 +2523,21 @@ def get_rebalance_dates(dates, frequency, date_type):
             if candidates:
                 rebalance_dates.add(candidates[0])
             # else: the period hasn't reached its mid/last yet — no rebalance.
+
+    if offset_sessions:
+        # EXECUTION LAG. The backtest ranks on a date's close and fills at that same
+        # close, which is impossible live: the data refresh, the run and the order all
+        # happen after the market shut. Shifting every rebalance forward N SESSIONS
+        # (not calendar days) models actually trading on the next session, or the one
+        # after. A rebalance whose shifted date runs past the loaded data is dropped —
+        # trading on a day we have no prices for would be a different fiction.
+        idx = {d: i for i, d in enumerate(dates)}
+        shifted = set()
+        for d in rebalance_dates:
+            j = idx.get(d, -1) + int(offset_sessions)
+            if 0 <= j < len(dates):
+                shifted.add(dates[j])
+        return shifted
 
     return rebalance_dates
 

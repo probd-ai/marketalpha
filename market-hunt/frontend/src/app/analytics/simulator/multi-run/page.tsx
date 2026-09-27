@@ -104,7 +104,7 @@ const MultiRunContent = () => {
           rebalance_type: params.rebalanceType,
           universe: params.universe,
           benchmark_symbol: params.benchmarkSymbol || '50 EQL Wgt',
-          max_holdings: params.maxHoldings,
+          max_holdings: params.momentumRanking === 'none' ? null : params.maxHoldings,
           momentum_ranking: params.momentumRanking,
           start_date: params.startDate,
           end_date: params.endDate

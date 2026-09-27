@@ -39,11 +39,17 @@ interface SimulationParams {
   rebalanceType: 'equal_weight' | 'skewed'; // Allocation method
   universe: string; // NIFTY50 | NIFTY100 | NIFTY500 | any materialized index (e.g. NIFTY500MICRO750)
   benchmarkSymbol?: string;  // Optional benchmark override
-  maxHoldings: number; // Maximum number of stocks in portfolio
-  useAllEligible: boolean; // If true, hold all eligible stocks (ignore maxHoldings)
-  momentumRanking: '20_day_return' | 'price_roc_22d' | 'price_roc_66d' | 'price_roc_222d' | 'risk_adjusted' | 'technical' |
+  maxHoldings: number; // Maximum number of stocks in portfolio (ignored when momentumRanking === 'none')
+  // 'none' = no rank cut: hold every name that reaches this stage. Supersedes the old
+  // useAllEligible flag, which legacy URLs are mapped onto.
+  momentumRanking: 'none' |
+                   '20_day_return' | 'price_roc_22d' | 'price_roc_66d' | 'price_roc_222d' | 'risk_adjusted' | 'technical' |
                    'truevx_roc' | 'short_mean_roc' | 'mid_mean_roc' | 'long_mean_roc' | 'stock_score_roc' |
                    'price_roc_22d_low' | 'price_roc_222d_low'; // Momentum ranking method ("_low" = lowest ROC, buy-the-dip)
+  // Primary filter: ATH/ATL band between the strategy filter and the momentum ranking.
+  primaryFilterTake: 'none' | 'top50' | 'bottom50' | 'all';
+  primaryFilterMetric: 'ath' | 'atl';
+  primaryFilterBand: number;
   startDate: string;
   endDate: string;
   pointInTimeMembership: boolean; // Gate universe to index membership as-of each rebalance
@@ -244,8 +250,14 @@ const SimulationRunnerContent = () => {
       universe: (searchParams.get('universe') as SimulationParams['universe']) || 'NIFTY50',
       benchmarkSymbol: benchmarkFromUrl || '50 EQL Wgt', // Default to Equal Weight Index
       maxHoldings: parseInt(searchParams.get('maxHoldings') || '10'),
-      useAllEligible: searchParams.get('useAllEligible') === 'true',
-      momentumRanking: (searchParams.get('momentumRanking') as SimulationParams['momentumRanking']) || '20_day_return',
+      // Legacy URLs carried useAllEligible=true alongside a real ranking method; that
+      // combination now has one name — 'none'. Bookmarks keep working.
+      momentumRanking: (searchParams.get('useAllEligible') === 'true'
+        ? 'none'
+        : (searchParams.get('momentumRanking') as SimulationParams['momentumRanking']) || 'none'),
+      primaryFilterTake: (searchParams.get('primaryFilterTake') as SimulationParams['primaryFilterTake']) || 'none',
+      primaryFilterMetric: (searchParams.get('primaryFilterMetric') as SimulationParams['primaryFilterMetric']) || 'ath',
+      primaryFilterBand: parseFloat(searchParams.get('primaryFilterBand') || '5'),
       startDate: searchParams.get('startDate') || '2020-01-01',
       endDate: searchParams.get('endDate') || '2025-08-30',
       pointInTimeMembership: searchParams.get('pointInTimeMembership') === 'true',
@@ -314,8 +326,11 @@ const SimulationRunnerContent = () => {
         rebalance_type: params.rebalanceType, // Add rebalance type parameter
         universe: params.universe,
         benchmark_symbol: params.benchmarkSymbol || '50 EQL Wgt', // Always include benchmark
-        max_holdings: params.useAllEligible ? null : params.maxHoldings,
+        max_holdings: params.momentumRanking === 'none' ? null : params.maxHoldings,
         momentum_ranking: params.momentumRanking,
+        primary_filter_take: params.primaryFilterTake,
+        primary_filter_metric: params.primaryFilterMetric,
+        primary_filter_band: params.primaryFilterBand,
         start_date: params.startDate,
         end_date: params.endDate,
         point_in_time_membership: params.pointInTimeMembership,
@@ -944,10 +959,19 @@ const SimulationRunnerContent = () => {
                       {simulationParams?.rebalanceType === 'equal_weight' ? 'Equal Weight' : 'Skewed Allocation'}
                     </div>
                     <div className="text-gray-500 text-xs mt-1">
-                      {simulationParams?.useAllEligible
+                      {simulationParams?.momentumRanking === 'none'
                         ? 'All eligible stocks'
                         : `Max ${simulationParams?.maxHoldings} holdings`}
                     </div>
+                    {simulationParams && simulationParams.primaryFilterTake !== 'none' && (
+                      <div className="text-gray-500 text-xs mt-1">
+                        Primary: {simulationParams.primaryFilterMetric === 'ath' ? 'ATH' : 'ATL'}
+                        {' '}±{simulationParams.primaryFilterBand}%
+                        {simulationParams.primaryFilterTake === 'top50' ? ' · top 50%'
+                          : simulationParams.primaryFilterTake === 'bottom50' ? ' · bottom 50%'
+                          : ' · all'}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

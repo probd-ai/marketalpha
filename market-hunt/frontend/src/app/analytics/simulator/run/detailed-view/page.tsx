@@ -29,7 +29,12 @@ interface SimulationParams {
   universe: 'NIFTY50' | 'NIFTY100' | 'NIFTY500';
   benchmarkSymbol?: string;
   maxHoldings: number;
-  momentumRanking: string;
+  momentumRanking: string; // 'none' = no rank cut (hold all eligible)
+  // Primary filter must be carried through: this view RE-RUNS the simulation, so
+  // dropping it here would silently produce different numbers from the parent run.
+  primaryFilterTake?: 'none' | 'top50' | 'bottom50' | 'all';
+  primaryFilterMetric?: 'ath' | 'atl';
+  primaryFilterBand?: number;
   startDate: string;
   endDate: string;
 }
@@ -148,8 +153,11 @@ const DetailedViewContent = () => {
         rebalance_type: params.rebalanceType,
         universe: params.universe,
         benchmark_symbol: params.benchmarkSymbol || '50 EQL Wgt',
-        max_holdings: params.maxHoldings,
+        max_holdings: params.momentumRanking === 'none' ? null : params.maxHoldings,
         momentum_ranking: params.momentumRanking,
+        primary_filter_take: params.primaryFilterTake ?? 'none',
+        primary_filter_metric: params.primaryFilterMetric ?? 'ath',
+        primary_filter_band: params.primaryFilterBand ?? 5,
         start_date: params.startDate,
         end_date: params.endDate
       };
