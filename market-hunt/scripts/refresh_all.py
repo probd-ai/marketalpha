@@ -376,6 +376,18 @@ def stage_recon() -> dict:
     from pymongo import MongoClient
     db = MongoClient(MONGO_URI)[DB_NAME]
 
+    # Derived union universes (NIFTY500MICRO750, NIFTYSMALLMICRO500) are rebuilt from
+    # their parents on every refresh, so they never drift out of date. Each build is
+    # replay-validated against the live union before it is written; a mismatch refuses
+    # to store rather than corrupting a point-in-time timeline silently.
+    from scripts.materialize_broad_universe import materialize_all
+    log("[recon] rebuilding derived union universes")
+    derived = materialize_all(db=db, store=True, log=lambda m: log(f"[recon]{m}"))
+    if not all(derived.values()):
+        log(f"[recon] ⚠ derived universe(s) FAILED validation: "
+            f"{[k for k, v in derived.items() if not v]} — they keep their previous "
+            "membership rather than being overwritten with a wrong timeline")
+
     # 1) consistency vs freshly pulled constituents.
     #    GATE on the most-recent event only (detects unprocessed recent churn);
     #    the full cumulative replay is reported as info — it also surfaces known

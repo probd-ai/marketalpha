@@ -36,6 +36,12 @@ import asyncio as _asyncio
 import weakref as _weakref
 
 _shared_clients: "_weakref.WeakKeyDictionary" = _weakref.WeakKeyDictionary()
+
+# Price partitions whose indexes this process has already ensured, as (db, collection).
+# Index creation used to run on EVERY _get_price_collection call — 5 commands per call,
+# 35 per symbol on a 2020-2026 read, ~24k per NIFTY500 backtest. Mongo no-ops an existing
+# index, but each one is still a round-trip. Once per collection per process is enough.
+_price_indexes_ensured: set = set()
 _indexes_initialized: set = set()
 
 
@@ -147,7 +153,15 @@ class StockDataManager:
         """Get price collection for a specific year"""
         collection_name = self._get_partition_collection_name(year)
         collection = self.db[collection_name]
-        
+
+        # Ensure indexes once per collection per process, not on every read.
+        # Marked before awaiting so a burst of concurrent readers (700 symbols
+        # via asyncio.gather) doesn't all pile into the same create_index calls.
+        key = (self.database_name, collection_name)
+        if key in _price_indexes_ensured:
+            return collection
+        _price_indexes_ensured.add(key)
+
         # Create indexes if collection is new
         try:
             # Identity is (symbol, date): a symbol is the unique tradable entity.
@@ -371,10 +385,23 @@ class StockDataManager:
         else:
             year_range = range(start_year, end_year + 1)      # 2005, 2006, 2007, ..., 2025
         
+        # One query per PARTITION, not per year. Five consecutive years map onto a
+        # single prices_YYYY_YYYY collection and the query carries no year predicate,
+        # so iterating years re-ran the IDENTICAL query up to 5x and dropped the
+        # duplicates in the dedup below — a 2020-2026 read fetched 7039 rows to keep
+        # 1655. Collapse to the distinct partitions, preserving iteration order.
+        _seen_partitions = set()
+        partition_years = []
         for year in year_range:
+            name = self._get_partition_collection_name(year)
+            if name not in _seen_partitions:
+                _seen_partitions.add(name)
+                partition_years.append(year)
+
+        for year in partition_years:
             try:
                 collection = await self._get_price_collection(year)
-                
+
                 cursor = collection.find(query).sort("date", mongo_sort_direction)
                 if limit and len(all_records) >= limit:
                     break

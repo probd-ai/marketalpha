@@ -47,6 +47,7 @@ INDICATOR OUTPUT FORMAT (Its Not fixed just an example)
 
 import pandas as pd
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
 import logging
@@ -253,20 +254,15 @@ class TrueValueXHelper:
         """
         if len(high_data) < lookback:
             return np.full(len(high_data), np.nan)
-            
+
+        # Vectorised rolling extremes. sliding_window_view is a view (no copy) and
+        # max/min over axis 1 PROPAGATE NaN exactly as the previous np.max/np.min
+        # per-window loop did — pandas .rolling() would skip NaN instead, which is
+        # why it is not used here.
         result = np.full(len(high_data), np.nan)
-        
-        for i in range(lookback - 1, len(high_data)):
-            start_idx = i - lookback + 1
-            window_high = high_data[start_idx:i+1]
-            window_low = low_data[start_idx:i+1]
-            
-            trend_hh = np.max(window_high)
-            trend_ll = np.min(window_low)
-            
-            # 23% Fibonacci retracement (Pine Script: * 0.23)
-            result[i] = trend_ll + (trend_hh - trend_ll) * 0.23
-            
+        hh = sliding_window_view(high_data, lookback).max(axis=1)
+        ll = sliding_window_view(low_data, lookback).min(axis=1)
+        result[lookback - 1:] = ll + (hh - ll) * 0.23
         return result
     
     @staticmethod
@@ -283,17 +279,21 @@ class TrueValueXHelper:
         """
         if len(data) == 0:
             return np.array([])
-            
+
         alpha = 2.0 / (period + 1)
+
+        # Deliberately NOT vectorised. pandas' ewm evaluates the same recursion in a
+        # different operation order and the results differ in the last ULP, which would
+        # make freshly computed indicators disagree with every value already stored in
+        # the database. This loop is ~10ms of a ~400ms symbol; bit-exactness is worth
+        # more than the 2.5%.
         result = np.full(len(data), np.nan)
         result[0] = data[0]
-        
         for i in range(1, len(data)):
-            if not np.isnan(data[i]) and not np.isnan(result[i-1]):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+            if not np.isnan(data[i]) and not np.isnan(result[i - 1]):
+                result[i] = alpha * data[i] + (1 - alpha) * result[i - 1]
             else:
-                result[i] = data[i] if not np.isnan(data[i]) else result[i-1]
-                
+                result[i] = data[i] if not np.isnan(data[i]) else result[i - 1]
         return result
     
     @staticmethod
@@ -310,13 +310,12 @@ class TrueValueXHelper:
         """
         if len(data) < period:
             return np.full(len(data), np.nan)
-            
+
+        # np.mean over each window propagates NaN; pandas .rolling().mean() skips it.
+        # Keep the propagating behaviour the loop had.
         result = np.full(len(data), np.nan)
-        
-        for i in range(period - 1, len(data)):
-            start_idx = i - period + 1
-            result[i] = np.mean(data[start_idx:i+1])
-            
+        result[period - 1:] = sliding_window_view(
+            np.asarray(data, dtype=float), period).mean(axis=1)
         return result
     
     @staticmethod
@@ -333,17 +332,20 @@ class TrueValueXHelper:
         """
         if len(data) < strength:
             return np.full(len(data), False)
-            
+
+        # result[i] requires data[i-j+1] > data[i-j] for j = 1..strength, i.e. the
+        # `strength` consecutive diffs ending at i are all positive.
+        # NOTE the negation. The original breaks on `data[k+1] <= data[k]`, and that
+        # comparison is False when either side is NaN — so an all-NaN warm-up window
+        # counts as RISING. `diff > 0` would return False there and silently change
+        # trend_score during the warm-up. ~(a <= b) reproduces it exactly.
         result = np.full(len(data), False)
-        
-        for i in range(strength, len(data)):
-            is_rising = True
-            for j in range(1, strength + 1):
-                if data[i - j + 1] <= data[i - j]:
-                    is_rising = False
-                    break
-            result[i] = is_rising
-            
+        d = np.asarray(data, dtype=float)
+        with np.errstate(invalid="ignore"):
+            up = ~(d[1:] <= d[:-1])
+        if len(up) >= strength:
+            allup = sliding_window_view(up, strength).all(axis=1)
+            result[strength:] = allup[:len(data) - strength]
         return result
     
     @staticmethod
@@ -360,17 +362,16 @@ class TrueValueXHelper:
         """
         if len(data) < strength:
             return np.full(len(data), False)
-            
+
+        # Same NaN subtlety as is_rising: the original breaks on `>=`, which is False
+        # for NaN, so an all-NaN window counts as FALLING.
         result = np.full(len(data), False)
-        
-        for i in range(strength, len(data)):
-            is_falling = True
-            for j in range(1, strength + 1):
-                if data[i - j + 1] >= data[i - j]:
-                    is_falling = False
-                    break
-            result[i] = is_falling
-            
+        d = np.asarray(data, dtype=float)
+        with np.errstate(invalid="ignore"):
+            down = ~(d[1:] >= d[:-1])
+        if len(down) >= strength:
+            alldown = sliding_window_view(down, strength).all(axis=1)
+            result[strength:] = alldown[:len(data) - strength]
         return result
     
     @staticmethod
@@ -389,26 +390,17 @@ class TrueValueXHelper:
         falling = TrueValueXHelper.is_falling(data, strength)
         
         result = np.full(len(data), 0)
-        
-        for i in range(1, len(data)):
-            per_r = rising[i]
-            per_f = falling[i]
-            
-            # Pine Script logic: if per_r or (per_r[1] and not per_f)
-            if per_r or (rising[i-1] and not per_f):
-                per_r = True
-                
-            # Pine Script logic: if per_f or (per_f[1] and not per_r)  
-            if per_f or (falling[i-1] and not per_r):
-                per_f = True
-                
-            if per_r:
-                result[i] = 1  # Green
-            elif per_f:
-                result[i] = -1  # Red
-            else:
-                result[i] = 0  # Neutral
-                
+        if len(data) < 2:
+            return result
+
+        # The loop reads only rising[i], rising[i-1], falling[i], falling[i-1] — never a
+        # value it wrote — so it vectorises directly. per_r is computed first because the
+        # per_f test uses the UPDATED per_r, matching the original ordering.
+        r_i, f_i = rising[1:], falling[1:]
+        r_p, f_p = rising[:-1], falling[:-1]
+        per_r = r_i | (r_p & ~f_i)
+        per_f = f_i | (f_p & ~per_r)
+        result[1:] = np.where(per_r, 1, np.where(per_f, -1, 0))
         return result
     
     @staticmethod
@@ -424,16 +416,23 @@ class TrueValueXHelper:
         Returns:
             Scaled vote values between -1 and 1
         """
+        current = np.asarray(current, dtype=float)
+        level = np.asarray(level, dtype=float)
+        deadband = np.asarray(deadband, dtype=float)
+
         result = np.full(len(current), 0.0)
-        
-        for i in range(len(current)):
-            if not (np.isnan(current[i]) or np.isnan(level[i]) or np.isnan(deadband[i])):
-                db_safe = max(deadband[i], 1e-10)
-                x = (current[i] - level[i]) / db_safe
-                # Manual tanh: (exp(2x) - 1) / (exp(2x) + 1)
-                exp_2x = np.exp(2 * x)
-                result[i] = (exp_2x - 1) / (exp_2x + 1)
-                
+        ok = ~(np.isnan(current) | np.isnan(level) | np.isnan(deadband))
+        if not ok.any():
+            return result
+
+        db_safe = np.maximum(deadband[ok], 1e-10)
+        x = (current[ok] - level[ok]) / db_safe
+        # Keep the manual tanh expression rather than np.tanh: for large |x| exp(2x)
+        # overflows to inf and (inf-1)/(inf+1) yields nan, and that quirk is part of
+        # the stored indicator's history. np.tanh would return +-1.0 instead.
+        with np.errstate(over="ignore", invalid="ignore"):
+            exp_2x = np.exp(2 * x)
+            result[ok] = (exp_2x - 1) / (exp_2x + 1)
         return result
 
 
@@ -511,12 +510,13 @@ def calculate_truevx_ranking(target_data: List[Dict], benchmark_data: List[Dict]
     
     # Calculate ranges for deadbands
     def get_range(high_vals, low_vals, length):
+        # Same rolling-extreme pattern as dynamic_fib; NaN-propagating like the
+        # np.max/np.min loop it replaces.
         result = np.full(len(high_vals), np.nan)
-        for i in range(length - 1, len(high_vals)):
-            start_idx = i - length + 1
-            window_high = high_vals[start_idx:i+1]
-            window_low = low_vals[start_idx:i+1]
-            result[i] = np.max(window_high) - np.min(window_low)
+        if len(high_vals) >= length:
+            hh = sliding_window_view(high_vals, length).max(axis=1)
+            ll = sliding_window_view(low_vals, length).min(axis=1)
+            result[length - 1:] = hh - ll
         return result
     
     rng_s = get_range(h, l, s1)
