@@ -51,3 +51,5 @@ market-hunt/scripts/research_grid/**/*.log
 market-hunt/scripts/research_grid/**/*.html
 market-hunt/scripts/research_grid/**/*.pyc
 market-hunt/scripts/research_grid/**/__pycache__/
+# ad-hoc experiment outputs in market-hunt/ (the _*.py scripts are tracked)
+market-hunt/_*.json
