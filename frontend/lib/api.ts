@@ -1,66 +1,90 @@
-import type { Portfolio, RunResult, Strategy, Universe } from "./types";
+/** Typed client for the market-hunt /api/fund endpoints (proxied by next.config rewrites). */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
+export type Status = "PASS" | "WARN" | "BLOCK";
+export type RunStatus = "DRAFT" | "PUBLISHED" | "EXECUTING" | "CLOSED" | "DISCARDED";
+
+export interface Check { name: string; status: Status; detail: string; items: unknown[] }
+export interface TicketLine {
+  line_id: string; sleeve: string; symbol: string; side: "BUY" | "SELL"; qty: number; ref_px: number;
+  value: number; limit_px: number; reasons: string[]; reason_text: string; full_exit: boolean;
+}
+export interface Holding {
+  symbol: string; shares: number; price: number; value: number; weight: number; lots: number; oldest_age: number;
+  held_since: string; roc22?: number; grid?: number; alpha?: boolean;
+}
+export interface Book {
+  id: string; label: string; kind: "grid10" | "tranche" | "asset"; target_weight: number; weight: number;
+  value: number; cash: number; holdings: Holding[]; curve_cagr: number | null;
+}
+export interface Perf { cagr: number | null; total_return: number; max_dd: number; dd_now: number; r_1m: number; r_3m: number; r_1y: number }
+export interface FundSummary extends Perf {
+  capital: number; value: number; value_before_flows?: number; net_invested?: number; live_since: string | null; nifty: Perf; model_start: string;
+}
+export interface SleeveSummary { id: string; label: string; target_weight: number; weight: number; value: number; cagr: number | null }
+export interface Curve { dates: string[]; fund: number[]; nifty: number[] }
+export interface Execution { line_id: string; status: "done" | "partial" | "skipped"; qty: number; price: number | null; note?: string }
+export interface Run {
+  _id: string; version: number; engine_version: string; status: RunStatus; run_type: string; signal_date: string;
+  fill_date: string; iso_week: string; monthly_reset: boolean; initial_build?: boolean;
+  rebalance?: { due: boolean; why: string | null; drift_pts: number; months: number[]; band_pts: number | null }; verdict: Status; checks: Check[]; ticket: TicketLine[];
+  residuals: { sleeve: string; symbol: string; model_shares: number }[]; fund: FundSummary; sleeves: SleeveSummary[];
+  books: Book[]; curve: Curve; created_at: string; published_at?: string; executions?: Execution[]; fingerprint: string;
+  drift_hash?: string | null;
+}
+export type RunListItem = Omit<Run, "ticket" | "books" | "curve" | "residuals">;
+export interface Job { job_id: string; status: "running" | "done" | "refused" | "error"; message: string; result?: string; error?: string }
+export interface DeskStatus {
+  config_version: number; fund_name: string; capital: number; model_start: string; latest_prices: string | null;
+  today: string; last_run: RunListItem | null; last_published: RunListItem | null; open_tickets: string[]; job: Job | null;
+}
+export interface SleeveConfig {
+  id: string; label: string; kind: "grid10" | "tranche" | "asset"; universe?: string; symbol?: string; weight: number;
+  params?: Record<string, number>;
+}
+export interface FundConfig {
+  name: string; capital: number; model_start: string; backfill_weekday: number; slippage_bp: number;
+  reset_cost: number; limit_band: number; rebalance_months: number[]; rebalance_band: number | null; version: number;
+  sleeves: SleeveConfig[]; updated_at?: string;
+}
+export interface ActualRow { sleeve: string; symbol: string; actual_qty: number; model_qty: number; gap_qty: number; gap_value: number | null; price: number | null }
+export interface CashFlow {
+  _id: string; amount: number; note: string; status: "PENDING" | "APPLIED" | "CANCELLED"; created_at: string;
+  applied_run_id?: string; nav?: number; units?: number;
+}
+export interface JournalEntry { at: string; event: string; detail: Record<string, unknown> }
 
 export class ApiError extends Error {
-  constructor(public status: number, public detail: string) { super(detail); this.name = "ApiError"; }
+  constructor(public status: number, message: string) { super(message); }
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { headers: { "Content-Type": "application/json" }, ...init });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try { detail = (await res.json()).detail ?? detail; } catch { /* keep default */ }
-    throw new ApiError(res.status, detail);
+  // X-Fund-Desk marks requests from this app; the backend refuses state changes without it (CSRF guard).
+  const r = await fetch(path, { ...init, headers: { "Content-Type": "application/json", "X-Fund-Desk": "1", ...(init?.headers ?? {}) } });
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { const b = await r.json(); msg = typeof b.detail === "string" ? b.detail : JSON.stringify(b.detail ?? b); } catch { /* keep statusText */ }
+    throw new ApiError(r.status, msg);
   }
-  return res.json() as Promise<T>;
+  return r.json() as Promise<T>;
 }
 
 export const api = {
-  async listPortfolios(): Promise<Portfolio[]> {
-    return (await req<{ portfolios: Portfolio[] }>("/api/portfolio")).portfolios;
-  },
-  async getPortfolio(id: string): Promise<Portfolio> {
-    return (await req<{ portfolio: Portfolio }>(`/api/portfolio/${id}`)).portfolio;
-  },
-  async createPortfolio(body: Portfolio): Promise<{ portfolio_id: string }> {
-    return req("/api/portfolio", { method: "POST", body: JSON.stringify(body) });
-  },
-  async updatePortfolio(id: string, body: Portfolio): Promise<{ portfolio_id: string }> {
-    return req(`/api/portfolio/${id}`, { method: "PUT", body: JSON.stringify(body) });
-  },
-  async deletePortfolio(id: string): Promise<{ success: boolean }> {
-    return req(`/api/portfolio/${id}`, { method: "DELETE" });
-  },
-  async startPortfolioRun(id: string, endDate?: string, startDate?: string): Promise<{ job_id: string; status: string }> {
-    const params = new URLSearchParams();
-    if (startDate) params.set("start_date", startDate);
-    if (endDate) params.set("end_date", endDate);
-    const qs = params.toString();
-    return req(`/api/portfolio/${id}/run${qs ? `?${qs}` : ""}`, { method: "POST" });
-  },
-  async getRunStatus(jobId: string): Promise<{ status: string; result: RunResult | null; error: string | null }> {
-    return req(`/api/portfolio/run-status/${jobId}`);
-  },
-  async runPortfolio(id: string, endDate?: string, startDate?: string): Promise<RunResult> {
-    const { job_id } = await api.startPortfolioRun(id, endDate, startDate);
-    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    const maxPolls = 200; // ~6-7 min ceiling at 2s
-    for (let i = 0; i < maxPolls; i++) {
-      await sleep(2000);
-      const s = await api.getRunStatus(job_id);
-      if (s.status === "completed" && s.result) return s.result;
-      if (s.status === "failed") throw new ApiError(0, s.error ?? "Run failed");
-    }
-    throw new ApiError(0, "Run timed out");
-  },
-  async listStrategies(): Promise<Strategy[]> {
-    return (await req<{ strategies: Strategy[] }>("/api/simulation/strategies")).strategies;
-  },
-  async createStrategy(body: { name: string; description: string; rules: Strategy["rules"] }): Promise<{ strategy_id: string }> {
-    return req("/api/simulation/strategies", { method: "POST", body: JSON.stringify(body) });
-  },
-  async listUniverses(): Promise<Universe[]> {
-    return (await req<{ universes: Universe[] }>("/api/data/universes")).universes;
-  },
+  status: () => req<DeskStatus>("/api/fund/status"),
+  config: () => req<FundConfig>("/api/fund"),
+  saveConfig: (c: Partial<FundConfig>) => req<FundConfig>("/api/fund", { method: "PUT", body: JSON.stringify(c) }),
+  startRun: () => req<{ job_id: string }>("/api/fund/runs", { method: "POST" }),
+  job: (id: string) => req<Job>(`/api/fund/jobs/${id}`),
+  runs: () => req<RunListItem[]>("/api/fund/runs"),
+  run: (id: string) => req<Run>(`/api/fund/runs/${id}`),
+  publish: (id: string) => req<Run>(`/api/fund/runs/${id}/publish`, { method: "POST" }),
+  discard: (id: string) => req<{ status: string }>(`/api/fund/runs/${id}/discard`, { method: "POST" }),
+  ackDrift: (runId: string) => req<{ acknowledged: string }>("/api/fund/drift/ack", { method: "POST", body: JSON.stringify({ run_id: runId }) }),
+  record: (id: string, items: Partial<Execution>[]) =>
+    req<{ status: RunStatus; recorded: number; lines: number }>(`/api/fund/runs/${id}/executions`, { method: "POST", body: JSON.stringify(items) }),
+  books: () => req<{ run_id: string | null; signal_date?: string; fund?: FundSummary; books: Book[]; curve?: Curve; sleeves?: SleeveSummary[] }>("/api/fund/books"),
+  actual: () => req<{ as_of_run: string | null; rows: ActualRow[]; tracking_value: number }>("/api/fund/actual"),
+  journal: () => req<JournalEntry[]>("/api/fund/journal"),
+  cashflows: () => req<CashFlow[]>("/api/fund/cashflows"),
+  addCashflow: (amount: number, note: string) => req<CashFlow>("/api/fund/cashflows", { method: "POST", body: JSON.stringify({ amount, note }) }),
+  cancelCashflow: (id: string) => req<{ status: string }>(`/api/fund/cashflows/${id}/cancel`, { method: "POST" }),
 };

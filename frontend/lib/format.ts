@@ -1,25 +1,40 @@
-export const EARLIEST_INCEPTION = "2022-01-01";
+/** Display formatting. Numbers are never recomputed here — only presented. */
 
-export function formatINR(n: number): string {
-  const sign = n < 0 ? "-" : "";
-  return sign + "₹" + Math.round(Math.abs(n)).toLocaleString("en-IN");
+const inr = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 });
+
+/** ₹ with Indian grouping; values ≥ 1 lakh shown in lakh (L) or crore (Cr). */
+export function rupees(v: number | null | undefined, opts: { compact?: boolean } = {}): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "—";
+  const sign = v < 0 ? "−" : "";
+  const a = Math.abs(v);
+  if (opts.compact !== false && a >= 1e7) return `${sign}₹${(a / 1e7).toFixed(2)} Cr`;
+  if (opts.compact !== false && a >= 1e5) return `${sign}₹${(a / 1e5).toFixed(2)} L`;
+  return `${sign}₹${inr.format(a)}`;
 }
 
-export function formatLakh(n: number): string {
-  const sign = n < 0 ? "-" : "";
-  const a = Math.abs(n);
-  if (a >= 1e7) return `${sign}₹${(a / 1e7).toFixed(2)}Cr`;
-  if (a >= 1e5) return `${sign}₹${(a / 1e5).toFixed(2)}L`;
-  return formatINR(n);
+export function pct(v: number | null | undefined, digits = 1, signed = false): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "—";
+  const s = v.toFixed(digits);
+  return `${signed && v > 0 ? "+" : ""}${s.replace("-", "−")}%`;
 }
 
-export function formatPct(n: number, withSign = true): string {
-  const s = withSign && n > 0 ? "+" : "";
-  return `${s}${n.toFixed(1)}%`;
+export function qty(v: number | null | undefined): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "—";
+  return inr.format(Math.round(v));
 }
 
-export function defaultInception(): string {
-  const d = new Date();
-  d.setFullYear(d.getFullYear() - 1);
-  return d.toISOString().slice(0, 10);
+export function price(v: number | null | undefined): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "—";
+  return v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+export function day(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso.length <= 10 ? `${iso}T00:00:00` : iso);
+  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+export function dayTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }

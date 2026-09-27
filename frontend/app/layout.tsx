@@ -1,22 +1,17 @@
-import "./globals.css";
 import type { Metadata } from "next";
-import { Providers } from "./providers";
-import { Nav } from "@/components/nav";
+import type { ReactNode } from "react";
 
-export const metadata: Metadata = { title: "tvagent — Live Portfolio" };
+import { Shell } from "@/components/Shell";
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+import "./globals.css";
+
+export const metadata: Metadata = { title: "Fund Desk · tvagent", description: "Model-portfolio trading desk" };
+
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
-      <body>
-        <Providers>
-          <div style={{ display: "flex", minHeight: "100vh" }}>
-            <Nav />
-            <main style={{ flex: 1, padding: "18px 22px", maxWidth: 1500, margin: "0 auto" }}>
-              {children}
-            </main>
-          </div>
-        </Providers>
+    <html lang="en" suppressHydrationWarning>
+      <body className="font-sans antialiased">
+        <Shell>{children}</Shell>
       </body>
     </html>
   );
