@@ -237,7 +237,7 @@ export default function BrokersPage() {
           <div>
             <h1 className="text-xl font-bold text-gray-900">Brokers</h1>
             <p className="text-xs text-gray-500">
-              Read-only connectivity (holdings · funds). Order placement is intentionally not wired — Stage 2.
+              Connectivity (holdings · funds). Order placement IS wired on Dhan — real orders go out only from a human-approved sync-plan, behind the kill switch, value caps and market-hours guard.
             </p>
           </div>
         </div>

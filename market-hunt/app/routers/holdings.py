@@ -12,6 +12,7 @@ SECURITY: mirrors the broker router — localhost-only unless MH_API_TOKEN is se
 Broker exports contain PII (holder name, UCC, mobile, email); none of it is persisted,
 and the account is tracked only by a one-way fingerprint.
 """
+import asyncio
 import datetime as dt
 import logging
 import os
@@ -143,6 +144,98 @@ async def holdings_status(portfolio_id: str, request: Request,
     folder = (p.get("holdings_path") or "").strip()
     discretionary = p.get("discretionary") or {}
     target, last_rebalance, run_meta = _target_book(db, portfolio_id)
+
+    # ---- live API source takes precedence over the downloaded file -----------
+    # When a broker is configured, the API is authoritative: it returns settled
+    # symbols and ISINs directly, so the file path's name-resolution, stale-file
+    # and two-exports-in-one-folder failures cannot occur. A configured-but-failing
+    # API must NOT silently fall back to the file — a stale export reconciled as if
+    # it were live is exactly the confidently-wrong answer this refuses to give.
+    live_broker = (p.get("live_broker") or "").strip()
+    if live_broker:
+        # A portfolio may be funded by SEVERAL accounts, so the connected set is
+        # UNIONED — the same reason the folder path aggregates a whole folder.
+        live_accounts = p.get("live_accounts") or (
+            [p["live_account"]] if p.get("live_account") else ["default"])
+        reads, failures = [], []
+        for acct in live_accounts:
+            try:
+                from brokers import BrokerError
+                from brokers.dhan import DhanClient
+                from brokers.kite import KiteClient
+                client = (DhanClient(acct) if live_broker == "dhan"
+                          else KiteClient() if live_broker == "kite" else None)
+                if client is None:
+                    raise BrokerError(f"unknown broker '{live_broker}'")
+                if not client.configured:
+                    raise BrokerError(f"account '{acct}' has no stored credentials "
+                                      "— run scripts/credentials.py store")
+                hold = await asyncio.to_thread(client.holdings)
+                try:
+                    cash = (await asyncio.to_thread(client.funds)).available_cash
+                except Exception:                                    # noqa: BLE001
+                    cash = 0.0
+                reads.append({"broker": live_broker, "account": acct,
+                              "client_ref": getattr(client, "client_id", None),
+                              "holdings": hold, "cash": cash})
+            except Exception as e:                                   # noqa: BLE001
+                failures.append(f"{acct}: {e}")
+
+        # PARTIAL UNION IS WORSE THAN NONE. If one account of several fails, the
+        # union is missing real positions and every one of them reads as a BUY the
+        # user has already made. Refuse the whole read rather than report that.
+        if failures:
+            return JSONResponse(content={
+                "success": True, "portfolio_id": portfolio_id,
+                "source": "api", "broker": live_broker, "accounts_configured": live_accounts,
+                "sync": {"state": "API_UNAVAILABLE",
+                         "message": f"Live {live_broker} read failed for "
+                                    f"{len(failures)} of {len(live_accounts)} account(s): "
+                                    + "; ".join(failures) +
+                                    ". Refusing a partial union — missing positions would "
+                                    "read as BUYs you have already made."},
+                "target_count": len(target)})
+
+        agg = hs.aggregate_from_api_multi(reads)
+        doc, is_new = hs.record_aggregate(db, portfolio_id, agg)
+        lock = hs.active_lock(db, portfolio_id)
+        observed = agg["quantities"]
+        rec = bh.reconcile(target, observed, discretionary)
+        sync = hs.sync_state(snapshot={**doc, "account_fingerprint": None}, lock=lock,
+                             last_rebalance=None,          # a live read is never stale
+                             gaps=rec["gaps"], unresolved=None,
+                             expected_fingerprint=None)
+        if run_meta.get("stale"):
+            sync = {"state": "RUN_STALE",
+                    "message": "The portfolio's cached run was computed against older "
+                               f"data ({run_meta.get('data_version')}) so its book "
+                               "predates the latest rebalance. Re-run the portfolio "
+                               "before trusting any gap.",
+                    **{k: v for k, v in run_meta.items() if k != "stale"}}
+
+        # Two portfolios claiming the same account cannot be told apart from holdings
+        # alone -- identically-configured sleeves would each see the other's stock as
+        # its own. Surface it; never silently reconcile both against one book.
+        shared = [q["id"] for q in db.portfolios.find(
+            {"id": {"$ne": portfolio_id}, "live_broker": live_broker,
+             "live_accounts": {"$in": live_accounts}}, {"_id": 0, "id": 1})]
+
+        return JSONResponse(content={
+            "success": True, "portfolio_id": portfolio_id,
+            "source": "api", "broker": live_broker, "accounts_configured": live_accounts,
+            "sync": sync, "snapshot_id": doc["id"], "newly_ingested": is_new,
+            "sources": agg["sources"], "accounts": agg["fingerprints"],
+            "file_as_of": agg["as_of"], "as_of_source": "broker_api",
+            "last_rebalance": last_rebalance, "run": run_meta,
+            "target": target, "observed": observed, "discretionary": discretionary,
+            "settlement": agg["settlement"], "by_account": agg["by_account"],
+            "shared_account_with": shared,
+            "roc": _roc_table(db, sorted(set(target) | set(observed) | set(discretionary))),
+            "unresolved": [], **rec,
+            "note": "Live broker API read, unioned across "
+                    f"{len(reads)} account(s). `by_account` carries the per-account "
+                    "split — a SELL can only be placed where the stock actually sits.",
+        })
 
     if not folder:
         return JSONResponse(content={
@@ -301,6 +394,34 @@ async def set_config(portfolio_id: str, payload: dict, request: Request,
         if folder and not os.path.isdir(folder):
             raise HTTPException(status_code=400, detail=f"not a directory: {folder}")
         update["holdings_path"] = folder
+    if "live_broker" in (payload or {}):
+        # Empty string clears it and returns the portfolio to the file source.
+        broker = (payload["live_broker"] or "").strip().lower()
+        if broker and broker not in ("dhan", "kite"):
+            raise HTTPException(status_code=400,
+                                detail=f"unknown broker '{broker}' — use dhan or kite")
+        raw = payload.get("live_accounts")
+        if raw is None:
+            raw = [payload.get("live_account") or "default"]
+        accounts = [str(a).strip().lower() for a in raw if str(a).strip()]
+        if broker == "dhan":
+            # Refuse to point a portfolio at an account with no credentials — the
+            # alternative is a green checkbox that silently fails on every read.
+            from brokers.dhan import list_accounts
+            available = list_accounts()
+            missing = [a for a in accounts if a not in available]
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"no stored credentials for Dhan account(s) "
+                           f"{', '.join(missing)} — available: "
+                           f"{', '.join(available) or 'none'}")
+        if broker and not accounts:
+            raise HTTPException(status_code=400,
+                                detail="select at least one account to connect")
+        update["live_broker"] = broker
+        update["live_accounts"] = accounts if broker else []
+        update["live_account"] = (accounts[0] if broker and accounts else "")
     if payload.get("pin_account"):
         folder = update.get("holdings_path") or p_existing.get("holdings_path", "")
         files = hs.read_folder(folder, hs.load_aliases(db))

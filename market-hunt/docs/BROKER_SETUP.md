@@ -1,7 +1,10 @@
-# Broker Setup — Kite + Dhan (read-only)
+# Broker Setup — Kite + Dhan
 
-Security model, then setup. **Nothing here places orders** — Stage 2 adds that behind an
-approval flow.
+Security model, then setup.
+
+⚠ **This system places real orders on both Dhan and Kite.** Stage 2 has shipped. Order
+placement runs behind an approval flow — see the gate list below. An earlier version of
+this page said nothing here places orders; that was false.
 
 ## Security model
 
@@ -9,7 +12,8 @@ approval flow.
 |---|---|
 | Secrets at rest | Only in `market-hunt/.env` (gitignored) — never in code, Mongo, or the frontend |
 | Kite daily token | Exchanged server-side (api_secret never leaves the box), cached **Fernet-encrypted** in `.secrets/` (gitignored); auto-evicted on expiry |
-| API surface | `/api/broker/*` is **read-only** (holdings/funds/profile). No order endpoints exist |
+| API surface | `/api/broker/*` is read-only (holdings/funds/profile). Execution lives on the **plan-scoped** verbs `/api/broker-mapping/{id}/sync-plan`, `/api/sync-plan/{id}/approve`, `/execute`, `/refresh-status` — none of which accept a caller-supplied symbol, quantity or price |
+| Order gate | A real order needs ALL of: `MH_TRADING_ENABLED=true` · plan approved by a human · plan < 24h old · plan funded · within per-order (`MH_MAX_ORDER_VALUE`) and per-run (`MH_MAX_EXECUTION_VALUE`) caps · NSE market hours · `dry_run=false` explicitly passed (it defaults to **true**). Every attempt is audited; an atomic lock prevents double-punching |
 | Access guard | `MH_API_TOKEN` unset → only localhost clients allowed (403 otherwise). Set → every call needs `X-API-Key` (constant-time compare) — required before exposing via tunnel |
 | Leak hygiene | Broker errors are sanitized; tests assert tokens never appear in responses or error text (`tests/test_broker_security.py`, 11 tests) |
 
@@ -64,7 +68,8 @@ Layered guards — every one must pass for a real order:
 Every attempt — including dry runs — is audited in Mongo `execution_log`. Fill status:
 **Refresh fills** pulls the day's order book and updates per-row punched/filled quantities.
 
-securityIds resolve from Dhan's scrip master (auto-downloaded, cached in `dhan_instruments`;
+Broker identifiers resolve from Dhan's scrip master (auto-downloaded, cached in `instruments`,
+keyed on ISIN so a ticker rename still resolves;
 `POST /api/broker/dhan/instruments/refresh` to re-pull). ⚠ Before first live punch: verify the
 order payload fields against current DhanHQ v2 docs, place ONE small manual test order via
 `dry_run=false` with a tiny `MH_MAX_EXECUTION_VALUE`, and confirm it lands in Dhan web.

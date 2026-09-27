@@ -24,10 +24,13 @@ DEFAULT_SETTINGS = {
     "sell_unknown": False,           # never auto-sell names the sim doesn't know
     "product": "CNC",                # delivery only — never intraday
     "order_type": "LIMIT",           # LIMIT default: microcaps punish market orders
-    "limit_band_percent": 1.0,       # limit price = LTP ± band (BUY above, SELL below)
+    "limit_band_percent": 0.1,       # limit price = LTP ± band (BUY above, SELL below)
     "max_participation_percent": 10.0,  # cap order at this % of 20-day avg daily value
     "exclude_symbols": [],           # never BUY or SELL these via sync
     "funding_haircut_percent": 1.0,  # assume sells realize this much less when checking cash
+    "group_size": 3,                 # chain in groups: sell N, then buy N from the
+                                     # proceeds those sells realized. 0 disables
+                                     # chaining (whole-plan slicing, the old way).
 }
 
 
@@ -42,6 +45,7 @@ def normalize_settings(raw: dict | None) -> dict:
     s["limit_band_percent"] = max(0.0, float(s.get("limit_band_percent", 1.0)))
     s["max_participation_percent"] = max(0.0, float(s.get("max_participation_percent", 10.0)))
     s["funding_haircut_percent"] = max(0.0, float(s.get("funding_haircut_percent", 1.0)))
+    s["group_size"] = max(0, int(s.get("group_size", 3) or 0))
     s["exclude_symbols"] = sorted({str(x).strip().upper()
                                    for x in (s.get("exclude_symbols") or []) if str(x).strip()})
     if s.get("order_type") not in ("LIMIT", "MARKET"):
@@ -87,22 +91,45 @@ def _apply_liquidity_and_limits(row: dict, s: dict, adv_values: dict,
         row["suggested_slices"] = 1
 
 
-def build_sync_plan(*, sim_book: list[dict], live_holdings: list[dict],
-                    available_cash: float, settings: dict | None,
+def build_sync_plan(*, sim_book: list[dict], live_holdings: list[dict] | None,
+                    available_cash: float | None, settings: dict | None,
                     adv_values: dict[str, float] | None = None,
-                    fresh_prices: dict[str, float] | None = None) -> dict:
+                    fresh_prices: dict[str, float] | None = None,
+                    discretionary: dict[str, float] | None = None,
+                    by_account: dict[str, dict] | None = None) -> dict:
     """sim_book rows: {symbol, quantity, market_value, current_price}
     live_holdings rows: {symbol, quantity, last_price, market_value}
     adv_values: symbol -> 20-day average daily traded value (₹), for
     participation caps in illiquid names.
     Returns {actions, skipped, totals, warnings} — deterministic, side-effect-free."""
+    if by_account:
+        # Several accounts -> route every row. Cash does not move between accounts,
+        # so each is planned as its own self-funding book.
+        return build_sync_plan_routed(
+            sim_book=sim_book, by_account=by_account, settings=settings,
+            adv_values=adv_values, fresh_prices=fresh_prices,
+            discretionary=discretionary)
+    live_holdings = live_holdings or []
+    available_cash = available_cash or 0.0
     s = normalize_settings(settings)
     adv_values = adv_values or {}
     fresh_prices = fresh_prices or {}
+    # A NEVER-SELL FLOOR, per symbol. These shares are the user's, held alongside
+    # the strategy's, so they are subtracted from the position the planner may act
+    # on. They do NOT satisfy a target either -- 50 held privately with a target of
+    # 30 still means buy 30 -- matching broker_holdings.reconcile exactly.
+    disc = {str(k).upper(): float(v or 0) for k, v in (discretionary or {}).items()}
     excluded = set(s["exclude_symbols"])
     live = {h["symbol"]: h for h in live_holdings}
     sim_total = sum(float(b.get("market_value") or 0) for b in sim_book)
-    live_total = sum(float(h.get("market_value") or 0) for h in live_holdings)
+    # Discretionary shares are the USER'S, not strategy capital, so their value must
+    # not inflate the target the strategy is sized against.
+    def _system_value(h: dict) -> float:
+        mv = float(h.get("market_value") or 0)
+        held = float(h.get("quantity") or 0)
+        d = min(disc.get(str(h["symbol"]).upper(), 0.0), held)
+        return mv * ((held - d) / held) if held else mv
+    live_total = sum(_system_value(h) for h in live_holdings)
 
     if s["capital_mode"] == "fixed":
         target_total = float(s["fixed_capital"])
@@ -132,7 +159,9 @@ def build_sync_plan(*, sim_book: list[dict], live_holdings: list[dict],
             continue
         target_value = float(b.get("market_value") or 0) * factor
         h = live.get(sym)
-        live_qty = float(h["quantity"]) if h else 0.0
+        held_qty = float(h["quantity"]) if h else 0.0
+        disc_qty = min(disc.get(sym.upper(), 0.0), held_qty)
+        live_qty = max(held_qty - disc_qty, 0.0)   # what the STRATEGY owns
         px = price_of(sym, b)
         if px is None or px <= 0:
             skipped.append({"symbol": sym, "reason": "no price available"})
@@ -153,7 +182,16 @@ def build_sync_plan(*, sim_book: list[dict], live_holdings: list[dict],
             "symbol": sym, "exchange": "NSE", "security_id": None,
             "product": s["product"], "order_type": s["order_type"],
             "sim_qty": round(float(b.get("quantity") or 0), 4),
-            "live_qty": live_qty,
+            "live_qty": held_qty,
+            "discretionary_qty": disc_qty or None,
+            # What is actually deliverable today (settled, unpledged). Sizing runs
+            # on the total position above; EXECUTION clamps to this. Absent when
+            # the broker payload carried no settlement fields — then it stays None
+            # and the clamp is skipped rather than guessing.
+            "sellable_qty": (int(h["sellable_qty"])
+                             if h is not None and h.get("sellable_qty") is not None
+                             else None),
+            "isin": (h or {}).get("isin") or (b.get("isin") or ""),
             "qty": min(qty, int(live_qty)) if delta_value < 0 else qty,
             "last_price": px,
             "est_value": round(min(qty * px, live_value) if delta_value < 0 else qty * px, 2),
@@ -180,7 +218,16 @@ def build_sync_plan(*, sim_book: list[dict], live_holdings: list[dict],
             skipped.append({"symbol": sym, "reason": "excluded by mapping settings"})
             continue
         px = price_of(sym, None)
-        mv = float(h.get("market_value") or 0)
+        held_qty = float(h["quantity"])
+        disc_qty = min(disc.get(sym.upper(), 0.0), held_qty)
+        sys_qty = max(held_qty - disc_qty, 0.0)
+        unit = (float(h.get("market_value") or 0) / held_qty) if held_qty else 0.0
+        mv = sys_qty * unit
+        if sys_qty <= 0:
+            skipped.append({"symbol": sym,
+                            "reason": f"entirely discretionary ({disc_qty:g} held as "
+                                      "yours) — never sold"})
+            continue
         if not s["sell_unknown"]:
             skipped.append({"symbol": sym,
                             "reason": f"held in broker, not in sim (value ≈ ₹{mv:,.0f}) — sell_unknown is off"})
@@ -191,7 +238,11 @@ def build_sync_plan(*, sim_book: list[dict], live_holdings: list[dict],
         row = {
             "action": "SELL", "symbol": sym, "exchange": "NSE", "security_id": None,
             "product": s["product"], "order_type": s["order_type"],
-            "sim_qty": 0.0, "live_qty": float(h["quantity"]), "qty": int(h["quantity"]),
+            "sim_qty": 0.0, "live_qty": held_qty, "qty": int(sys_qty),
+            "discretionary_qty": disc_qty or None,
+            "sellable_qty": (int(min(float(h["sellable_qty"]), sys_qty))
+                             if h.get("sellable_qty") is not None else None),
+            "isin": h.get("isin") or "",
             "last_price": px, "est_value": round(mv, 2),
             "target_value": 0.0, "live_value": round(mv, 2),
             "reason": "not_in_sim", "drift_percent": None, "status": "planned",
@@ -239,4 +290,108 @@ def build_sync_plan(*, sim_book: list[dict], live_holdings: list[dict],
         "actions": actions,
         "skipped": skipped,
         "warnings": warnings,
+    }
+
+
+def build_sync_plan_routed(*, sim_book: list[dict],
+                           by_account: dict[str, dict],
+                           settings: dict | None,
+                           adv_values: dict[str, float] | None = None,
+                           fresh_prices: dict[str, float] | None = None,
+                           discretionary: dict[str, float] | None = None) -> dict:
+    """One portfolio across SEVERAL broker accounts, with every row routed.
+
+    `by_account`: {account: {"holdings": [...], "cash": float}}
+
+    Cash does not move between broker accounts, so each account is planned as its
+    own self-funding book: its sells fund only its buys. The allocator decides which
+    target belongs to which account; sells are then constrained to the accounts that
+    actually hold the stock.
+    """
+    import account_allocator
+
+    s = normalize_settings(settings)
+    fresh_prices = fresh_prices or {}
+    accounts = sorted(by_account)
+
+    # Capital per account = its live value + its own cash. Discretionary value is
+    # excluded the same way the single-account path excludes it.
+    disc = {str(k).upper(): float(v or 0) for k, v in (discretionary or {}).items()}
+
+    def sys_value(h: dict) -> float:
+        mv = float(h.get("market_value") or 0)
+        held = float(h.get("quantity") or 0)
+        d = min(disc.get(str(h["symbol"]).upper(), 0.0), held)
+        return mv * ((held - d) / held) if held else mv
+
+    capital = {a: sum(sys_value(h) for h in by_account[a]["holdings"])
+                  + float(by_account[a].get("cash") or 0) for a in accounts}
+    total_capital = sum(capital.values())
+
+    sim_total = sum(float(b.get("market_value") or 0) for b in sim_book)
+    factor = (total_capital / sim_total) if sim_total > 0 else 0.0
+    targets = {b["symbol"]: float(b.get("market_value") or 0) * factor for b in sim_book}
+
+    held = {a: {h["symbol"]: float(h.get("quantity") or 0)
+                for h in by_account[a]["holdings"]} for a in accounts}
+    assignment, alloc_report = account_allocator.allocate(targets, capital, held)
+
+    # Plan each account independently, then stitch. Sells are constrained naturally:
+    # an account only ever sees its OWN holdings, so it can only sell what it holds.
+    merged_actions, merged_skipped, merged_warnings = [], [], []
+    per_account_totals: dict[str, dict] = {}
+
+    for acct in accounts:
+        sub_sim = [b for b in sim_book if assignment.get(b["symbol"]) == acct]
+        sub = build_sync_plan(
+            sim_book=sub_sim, live_holdings=by_account[acct]["holdings"],
+            available_cash=float(by_account[acct].get("cash") or 0),
+            settings={**s, "capital_mode": "fixed", "fixed_capital": capital[acct]},
+            adv_values=adv_values, fresh_prices=fresh_prices, discretionary=disc)
+        for row in sub["actions"]:
+            row["account"] = acct
+            merged_actions.append(row)
+        for sk in sub["skipped"]:
+            merged_skipped.append({**sk, "account": acct})
+        merged_warnings += [f"[{acct}] {w}" for w in sub["warnings"]]
+        per_account_totals[acct] = {**sub["totals"], "feasible": sub["feasible"]}
+
+    # Re-sequence globally, SELLs before BUYs, stable by account then original seq.
+    sells = [r for r in merged_actions if r["action"] == "SELL"]
+    buys = [r for r in merged_actions if r["action"] == "BUY"]
+    # SELLs ordered by size descending: a name held in two accounts is sold from the
+    # larger holding first, emptying one account rather than leaving dust in both.
+    # Order among sells carries no funding dependency (each account funds only its
+    # own buys), so value ordering is free to take priority over account grouping.
+    actions = sorted(sells, key=lambda r: (-r["est_value"], r["account"], r["symbol"])) + \
+              sorted(buys, key=lambda r: (r["account"], r["seq"]))
+    for i, a in enumerate(actions, 1):
+        a["seq"] = i
+
+    buy_value = sum(a["est_value"] for a in buys)
+    sell_value = sum(a["est_value"] for a in sells)
+    cash_total = sum(float(by_account[a].get("cash") or 0) for a in accounts)
+    feasible = all(t["feasible"] for t in per_account_totals.values())
+
+    return {
+        "settings": s,
+        "feasible": feasible,
+        "accounts": accounts,
+        "allocation": assignment,
+        "allocation_report": alloc_report,
+        "fresh_quotes": len(fresh_prices),
+        "totals": {
+            "sim_value": round(sim_total, 2),
+            "live_value": round(total_capital - cash_total, 2),
+            "target_total": round(total_capital, 2),
+            "scale_factor": round(factor, 4),
+            "available_cash": round(cash_total, 2),
+            "buy_value": round(buy_value, 2), "sell_value": round(sell_value, 2),
+            "net_cash_needed": round(buy_value - sell_value, 2),
+            "action_count": len(actions),
+            "by_account": per_account_totals,
+        },
+        "actions": actions,
+        "skipped": merged_skipped,
+        "warnings": merged_warnings,
     }

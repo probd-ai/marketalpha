@@ -309,3 +309,82 @@ def sync_state(*, snapshot: dict | None, lock: dict | None,
     return {"state": "LOCKED_CLEAN",
             "message": "Live holdings match the locked baseline.",
             "locked_at": lock.get("locked_at")}
+
+
+def aggregate_from_api(holdings: list, *, broker: str, account: str,
+                       client_ref: str | None) -> dict:
+    """Single-account convenience wrapper over aggregate_from_api_multi.
+
+    Three of the file path's failure states are structurally impossible on the API
+    path, which is the whole reason for the option:
+      * UNRESOLVED    -- the API returns tradingSymbol and ISIN, so no display name
+                         needs an alias guessed for it.
+      * AMBIGUOUS     -- one token is one account; two exports cannot be confused.
+      * REBALANCE_DUE -- the read is live, never a file from before the rebalance.
+    """
+    return aggregate_from_api_multi([{"broker": broker, "account": account,
+                                      "client_ref": client_ref,
+                                      "holdings": holdings}])
+
+
+def aggregate_from_api_multi(reads: list[dict]) -> dict:
+    """Union several live broker accounts into one book for a portfolio.
+
+    `reads`: [{broker, account, client_ref, holdings}] — one per connected account.
+
+    Quantities SUM across accounts, matching how the folder path aggregates several
+    exports. But `by_account` keeps the per-account breakdown, and that is not
+    decoration: a SELL can only be placed in the account that actually holds the
+    stock, so execution must never work off the union alone.
+    """
+    quantities: dict[str, float] = {}
+    settlement: dict[str, dict] = {}
+    by_account: dict[str, dict] = {}
+    fingerprints, sources = [], []
+    now = dt.datetime.now()
+
+    for r in reads:
+        broker, account = r["broker"], r["account"]
+        fp = f"{broker}:{account}" + (f":{r.get('client_ref')}" if r.get("client_ref") else "")
+        fingerprints.append(fp)
+        acct_q: dict[str, float] = {}
+        for h in r["holdings"]:
+            if not h.symbol:
+                continue
+            quantities[h.symbol] = quantities.get(h.symbol, 0.0) + float(h.quantity)
+            acct_q[h.symbol] = acct_q.get(h.symbol, 0.0) + float(h.quantity)
+            s = settlement.setdefault(h.symbol, {"sellable": 0.0, "pending": 0.0,
+                                                 "pledged": 0.0, "isin": h.isin})
+            s["sellable"] += h.sellable_qty
+            s["pending"] += h.pending_qty
+            s["pledged"] += h.pledged_qty
+            if not s["isin"]:
+                s["isin"] = h.isin
+        by_account[account] = {
+            "broker": broker, "fingerprint": fp, "quantities": acct_q,
+            "settlement": {h.symbol: {"sellable": h.sellable_qty, "pending": h.pending_qty,
+                                      "pledged": h.pledged_qty, "isin": h.isin}
+                           for h in r["holdings"] if h.symbol},
+            "value": sum(h.market_value or 0 for h in r["holdings"]),
+            "cash": r.get("cash", 0.0),
+        }
+        sources.append({"file": f"{broker} API ({account})", "broker": broker,
+                        "account": fp, "positions": len(acct_q),
+                        "as_of": now.isoformat()})
+
+    return {
+        "quantities": quantities,
+        "fingerprints": sorted(fingerprints),
+        "as_of": now.isoformat(),
+        "as_of_source": "broker_api",
+        "unresolved": [],
+        # Hash covers every account's positions, so adding or removing an account
+        # from the union is a real change — not silently deduped as "unchanged".
+        "content_hash": hashlib.sha256(
+            ("|".join(sorted(fingerprints)) + "::" +
+             "|".join(f"{k}={v}" for k, v in sorted(quantities.items()))
+             ).encode()).hexdigest()[:16],
+        "sources": sources,
+        "settlement": settlement,
+        "by_account": by_account,
+    }

@@ -132,12 +132,10 @@ def test_broker_errors_never_contain_credentials():
     assert "SECRET_TOKEN_VALUE" not in str(e.value)
 
 
-def test_status_endpoint_never_returns_secrets(monkeypatch):
+def test_status_endpoint_never_returns_secrets(monkeypatch, fake_vault):
     import asyncio
-    monkeypatch.setenv("KITE_API_KEY", "kkey")
-    monkeypatch.setenv("KITE_API_SECRET", "ksecret")
-    monkeypatch.setenv("DHAN_CLIENT_ID", "cid")
-    monkeypatch.setenv("DHAN_ACCESS_TOKEN", "dtok")
+    fake_vault.update({"KITE_API_KEY": "kkey", "KITE_API_SECRET": "ksecret",
+                       "DHAN_CLIENT_ID": "cid", "DHAN_ACCESS_TOKEN": "dtok"})
     monkeypatch.delenv("MH_API_TOKEN", raising=False)
     import app.routers.broker as broker_router
     resp = asyncio.run(broker_router.broker_status(_Req("127.0.0.1"), None))
@@ -147,15 +145,92 @@ def test_status_endpoint_never_returns_secrets(monkeypatch):
         assert secret not in body
 
 
-def test_token_cache_roundtrip(tmp_path, monkeypatch):
+def test_token_cache_roundtrip(fake_vault):
+    """The daily token now lives in the Credential Manager, not a file. The old
+    scheme kept the Fernet key in .env beside the ciphertext in .secrets/, so
+    anyone who could read one could read the other."""
     import brokers.config as bc
-    monkeypatch.setattr(bc, "SECRETS_DIR", tmp_path / ".secrets")
-    monkeypatch.setattr(bc, "ENV_PATH", tmp_path / ".env")
-    (tmp_path / ".env").write_text("")
-    monkeypatch.delenv("MH_TOKEN_KEY", raising=False)
     bc.cache_token("t", "hello-token")
-    on_disk = (tmp_path / ".secrets" / "t.enc").read_bytes()
-    assert b"hello-token" not in on_disk  # encrypted at rest
     assert bc.read_cached_token("t") == "hello-token"
     bc.drop_cached_token("t")
     assert bc.read_cached_token("t") is None
+
+
+def test_no_secret_is_ever_written_to_disk(fake_vault, tmp_path, monkeypatch):
+    """Storing a credential must not create .secrets/ or touch .env."""
+    import brokers.config as bc
+    monkeypatch.setattr(bc, "ENV_PATH", tmp_path / ".env")
+    bc.set_secret("KITE_API_SECRET", "should-never-hit-disk")
+    assert not (tmp_path / ".env").exists()
+    assert not (bc.REPO_ROOT / ".secrets").exists(), ".secrets/ must no longer be used"
+
+
+def test_credentials_are_never_sourced_from_env(monkeypatch, fake_vault):
+    """No fallback, by design: a wiped credential must fail loudly rather than
+    silently pick up a stale environment value the user thought was gone."""
+    import brokers.config as bc
+    monkeypatch.setenv("KITE_API_SECRET", "stale-env-value")
+    assert bc.get_secret("KITE_API_SECRET") is None
+    with pytest.raises(bc.CredentialError):
+        bc.get("KITE_API_SECRET")      # refuses to read a credential from env
+
+
+def test_clear_all_wipes_every_stored_credential(fake_vault):
+    import brokers.config as bc
+    bc.set_secret("KITE_API_KEY", "a")
+    bc.set_secret("DHAN_ACCESS_TOKEN", "b")
+    assert sorted(bc.stored_names()) == ["DHAN_ACCESS_TOKEN", "KITE_API_KEY"]
+    removed = bc.clear_all()
+    assert sorted(removed) == ["DHAN_ACCESS_TOKEN", "KITE_API_KEY"]
+    assert bc.stored_names() == []
+    assert bc.get_secret("KITE_API_KEY") is None
+
+
+def test_empty_value_is_refused(fake_vault):
+    import brokers.config as bc
+    with pytest.raises(bc.CredentialError):
+        bc.set_secret("KITE_API_KEY", "   ")
+
+
+def test_stored_names_never_leak_values(fake_vault):
+    import brokers.config as bc
+    bc.set_secret("KITE_API_SECRET", "TOP_SECRET_VALUE")
+    assert "TOP_SECRET_VALUE" not in " ".join(bc.stored_names())
+
+
+# ---------- multi-account Dhan ----------------------------------------------
+
+def test_named_dhan_accounts_are_isolated(fake_vault):
+    """Two Dhan accounts must never share credentials — the whole point of
+    aliases is telling two identically-configured portfolios apart."""
+    import brokers.config as bc
+    from brokers.dhan import DhanClient, list_accounts
+    bc.set_secret("DHAN_CLIENT_ID", "cid-default")
+    bc.set_secret("DHAN_ACCESS_TOKEN", "tok-default")
+    bc.set_secret("DHAN_CLIENT_ID__SECOND", "cid-second")
+    bc.set_secret("DHAN_ACCESS_TOKEN__SECOND", "tok-second")
+
+    assert list_accounts() == ["default", "second"]
+    assert DhanClient().client_id == "cid-default"
+    assert DhanClient("second").client_id == "cid-second"
+    assert DhanClient("second").token == "tok-second"
+
+
+def test_account_with_only_a_client_id_is_not_listed(fake_vault):
+    """A half-configured account must not appear usable — it would fail at the
+    first API call with a confusing error instead of an obvious absence."""
+    import brokers.config as bc
+    from brokers.dhan import list_accounts
+    bc.set_secret("DHAN_CLIENT_ID__PARTIAL", "cid-only")
+    assert "partial" not in list_accounts()
+
+
+def test_unknown_account_is_unconfigured_not_a_silent_default(fake_vault):
+    """Asking for an account that was never stored must NOT quietly fall back to
+    the default account — that would trade the wrong book."""
+    import brokers.config as bc
+    from brokers.dhan import DhanClient
+    bc.set_secret("DHAN_CLIENT_ID", "cid-default")
+    bc.set_secret("DHAN_ACCESS_TOKEN", "tok-default")
+    c = DhanClient("nosuch")
+    assert c.configured is False and c.client_id is None

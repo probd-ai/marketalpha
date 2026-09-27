@@ -1,8 +1,14 @@
-"""Dhan API v2 — READ-ONLY client (holdings / fund limits / profile).
+"""Dhan API v2 client — reads (holdings / fund limits / profile) AND live orders.
 
-Auth model: DHAN_CLIENT_ID + DHAN_ACCESS_TOKEN in .env. The Dhan token is a
-long-lived (~30 day) static token generated on web.dhan.co — no daily flow.
-Rotate it by replacing the .env value. Never logged, never echoed.
+⚠ `place_order` below sends a REAL order to a funded account. It is reachable only
+via an approved sync-plan; see brokers/__init__.py for the full gate list.
+
+Auth model: DHAN_CLIENT_ID + DHAN_ACCESS_TOKEN in the Windows Credential
+Manager (scripts/credentials.py). NOT read from .env — there is no file
+fallback. The Dhan token is a long-lived (~30 day) static token generated on
+web.dhan.co, which makes it the largest standing exposure of the two brokers:
+rotate it deliberately, and wipe it between rebalances. Never logged, never
+echoed.
 """
 import requests
 
@@ -23,15 +29,13 @@ def _num(v, default=None):
 def list_accounts() -> list[str]:
     """Configured Dhan account aliases. Plain DHAN_CLIENT_ID = "default";
     additional accounts use DHAN_CLIENT_ID__<ALIAS> + DHAN_ACCESS_TOKEN__<ALIAS>."""
-    import os
-    config.load_env()
     aliases = []
-    if config.get("DHAN_CLIENT_ID") and config.get("DHAN_ACCESS_TOKEN"):
+    if config.get_secret("DHAN_CLIENT_ID") and config.get_secret("DHAN_ACCESS_TOKEN"):
         aliases.append("default")
-    for k in os.environ:
+    for k in config.stored_names():
         if k.startswith("DHAN_CLIENT_ID__"):
             alias = k[len("DHAN_CLIENT_ID__"):].lower()
-            if config.get(f"DHAN_ACCESS_TOKEN__{alias.upper()}"):
+            if config.get_secret(f"DHAN_ACCESS_TOKEN__{alias.upper()}"):
                 aliases.append(alias)
     return sorted(set(aliases))
 
@@ -40,15 +44,14 @@ class DhanClient:
     name = "dhan"
 
     def __init__(self, account: str = "default"):
-        config.load_env()
         self.account = (account or "default").lower()
         if self.account == "default":
-            self.client_id = config.get("DHAN_CLIENT_ID")
-            self.token = config.get("DHAN_ACCESS_TOKEN")
+            self.client_id = config.get_secret("DHAN_CLIENT_ID")
+            self.token = config.get_secret("DHAN_ACCESS_TOKEN")
         else:
             suffix = self.account.upper()
-            self.client_id = config.get(f"DHAN_CLIENT_ID__{suffix}")
-            self.token = config.get(f"DHAN_ACCESS_TOKEN__{suffix}")
+            self.client_id = config.get_secret(f"DHAN_CLIENT_ID__{suffix}")
+            self.token = config.get_secret(f"DHAN_ACCESS_TOKEN__{suffix}")
 
     @property
     def configured(self) -> bool:
@@ -90,10 +93,20 @@ class DhanClient:
             mv = round(qty * ltp, 2) if ltp is not None else None
             cost = qty * avg
             pnl = round(mv - cost, 2) if mv is not None else None
+            pending = _num(h.get("t1Qty"), 0) or 0
+            pledged = _num(h.get("collateralQty"), 0) or 0
+            # availableQty is authoritative. When absent, derive from what we DO
+            # know rather than falling back to totalQty — that fallback is exactly
+            # the over-sell bug this split exists to close. With no settlement
+            # fields at all this degrades to total, i.e. the previous behaviour.
+            avail = h.get("availableQty")
+            sellable = _num(avail, 0) if avail is not None else max(qty - pending - pledged, 0)
             out.append(Holding(
                 symbol=h.get("tradingSymbol", ""), exchange=h.get("exchange", "NSE"),
                 quantity=qty, avg_price=avg, last_price=ltp, market_value=mv, pnl=pnl,
-                pnl_percent=round(pnl / cost * 100, 2) if pnl is not None and cost else None))
+                pnl_percent=round(pnl / cost * 100, 2) if pnl is not None and cost else None,
+                isin=h.get("isin") or "",
+                sellable_qty=max(sellable, 0), pending_qty=pending, pledged_qty=pledged))
         return out
 
     def funds(self) -> Funds:

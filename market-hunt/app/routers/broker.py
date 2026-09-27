@@ -206,6 +206,26 @@ async def update_broker_mapping(mapping_id: str, payload: dict, request: Request
         upd["label"] = payload["label"]
     if "settings" in payload:
         upd["settings"] = broker_sync.normalize_settings(payload["settings"])
+    if "accounts" in payload:
+        # A mapping may span several accounts of one broker. Refuse any that has no
+        # stored credentials, rather than leaving a mapping that fails on every read.
+        accts = [str(a).strip().lower() for a in (payload["accounts"] or []) if str(a).strip()]
+        if not accts:
+            raise HTTPException(status_code=400, detail="accounts cannot be empty")
+        if m["broker"] == "dhan":
+            from brokers.dhan import list_accounts
+            avail = list_accounts()
+            missing = [a for a in accts if a not in avail]
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"no stored credentials for: {', '.join(missing)} — "
+                           f"available: {', '.join(avail) or 'none'}")
+        elif len(accts) > 1:
+            raise HTTPException(status_code=400,
+                                detail="only Dhan supports multiple accounts")
+        upd["accounts"] = accts
+        upd["account"] = accts[0]        # keep the legacy single-account field valid
     mongo_conn.db.broker_mappings.update_one({"id": mapping_id}, {"$set": upd})
     return JSONResponse(content={"success": True, "mapping_id": mapping_id})
 
@@ -239,12 +259,25 @@ async def create_sync_plan(mapping_id: str, request: Request,
                             detail="no cached run — run the portfolio first")
     sim_book = (run_doc.get("result") or {}).get("current_book", [])
 
-    client = _broker(m["broker"], m.get("account"))
+    # A mapping may span SEVERAL accounts. Cash does not move between them, so each
+    # is read separately and planned as its own self-funding book.
+    accounts = m.get("accounts") or [m.get("account") or "default"]
+    by_account: dict[str, dict] = {}
     try:
-        live = await asyncio.to_thread(lambda: [h.to_dict() for h in client.holdings()])
-        funds = await asyncio.to_thread(lambda: client.funds().to_dict())
+        for acct in accounts:
+            c = _broker(m["broker"], acct)
+            by_account[acct] = {
+                "holdings": await asyncio.to_thread(
+                    lambda c=c: [h.to_dict() for h in c.holdings()]),
+                "cash": await asyncio.to_thread(
+                    lambda c=c: c.funds().available_cash),
+            }
     except BrokerError as e:
+        # A PARTIAL read would plan against a book missing real positions, and
+        # every one of them would look like a BUY already made.
         raise HTTPException(status_code=502, detail=str(e))
+    live = [h for a in accounts for h in by_account[a]["holdings"]]
+    funds = {"available_cash": sum(by_account[a]["cash"] for a in accounts)}
 
     candidates = sorted({b["symbol"] for b in sim_book} | {h["symbol"] for h in live})
     adv = await asyncio.to_thread(_adv_values, candidates)
@@ -255,10 +288,18 @@ async def create_sync_plan(mapping_id: str, request: Request,
     fresh = await asyncio.to_thread(get_ltp_map, candidates)
     logger.info(f"🔄 fresh quotes: {len(fresh)}/{len(candidates)} symbols")
 
+    # Quantities the user holds privately. These are a NEVER-SELL FLOOR for the
+    # planner, not just a reconciliation display: without this the holdings page
+    # could show "20 of these are yours" while the plan queued all 40 for sale.
+    pf = mongo_conn.db.portfolios.find_one({"id": m["portfolio_id"]},
+                                           {"_id": 0, "discretionary": 1}) or {}
     plan_body = broker_sync.build_sync_plan(
-        sim_book=sim_book, live_holdings=live,
-        available_cash=funds.get("available_cash") or 0.0,
-        settings=m.get("settings"), adv_values=adv, fresh_prices=fresh)
+        sim_book=sim_book,
+        live_holdings=None if len(accounts) > 1 else live,
+        available_cash=None if len(accounts) > 1 else (funds.get("available_cash") or 0.0),
+        settings=m.get("settings"), adv_values=adv, fresh_prices=fresh,
+        discretionary=pf.get("discretionary") or {},
+        by_account=by_account if len(accounts) > 1 else None)
     plan = {
         "plan_id": f"plan_{int(datetime.now().timestamp() * 1000)}",
         "mapping_id": mapping_id,
@@ -323,6 +364,7 @@ def _refresh_dhan_instruments() -> int:
     c_sym = find("TRADING", "SYMBOL")
     c_series = find("SERIES")
     c_instr = find("INSTRUMENT", "NAME")
+    c_isin = find("ISIN")          # optional — absent in some master revisions
     if not (c_exch and c_secid and c_sym):
         raise RuntimeError(f"Dhan scrip master format changed — headers: {cols[:12]}")
 
@@ -337,27 +379,40 @@ def _refresh_dhan_instruments() -> int:
             continue
         sym = (row.get(c_sym) or "").strip()
         sec = (row.get(c_secid) or "").strip()
+        isin = (row.get(c_isin) or "").strip().upper() if c_isin else ""
         if sym and sec:
-            ops.append({"symbol": sym, "security_id": sec, "series": series})
+            ops.append({"symbol": sym, "security_id": sec, "series": series,
+                        # ISIN is the cross-broker identity; it survives renames.
+                        "isin": isin,
+                        "dhan_security_id": sec,
+                        # Kite orders by exchange tradingsymbol, which on NSE is
+                        # the same string as the scrip master's trading symbol.
+                        "kite_tradingsymbol": sym})
     if not ops:
         raise RuntimeError("Dhan scrip master parsed to zero NSE equity rows")
-    coll = mongo_conn.db.dhan_instruments
+    coll = mongo_conn.db.instruments
     coll.delete_many({})
     coll.insert_many(ops)
     coll.create_index("symbol")
+    coll.create_index("isin")
     return len(ops)
 
 
-def _dhan_security_ids(symbols: list[str]) -> dict[str, str]:
-    coll = mongo_conn.db.dhan_instruments
+def _resolve_instruments(rows: list[dict], broker: str) -> tuple[dict[str, str], list[str]]:
+    """Plan rows -> {symbol: broker identifier}, matched on ISIN first so a ticker
+    rename does not silently drop the row. Unresolved rows are REPORTED, never
+    guessed — the caller refuses them."""
+    import instrument_master as im
+    coll = mongo_conn.db.instruments
     if coll.estimated_document_count() == 0:
         _refresh_dhan_instruments()
-    out: dict[str, str] = {}
-    for d in coll.find({"symbol": {"$in": symbols}}, {"symbol": 1, "security_id": 1, "series": 1}):
-        # prefer EQ series when a symbol appears in multiple series
-        if d["symbol"] not in out or d.get("series") == "EQ":
-            out[d["symbol"]] = d["security_id"]
-    return out
+    symbols = [(r.get("symbol") or "").strip() for r in rows]
+    isins = [(r.get("isin") or "").strip().upper() for r in rows if r.get("isin")]
+    docs = list(coll.find({"$or": [{"symbol": {"$in": symbols}},
+                                   {"isin": {"$in": isins}}]},
+                          {"_id": 0, "symbol": 1, "isin": 1, "series": 1,
+                           "dhan_security_id": 1, "kite_tradingsymbol": 1}))
+    return im.resolve(rows, im.build_index(docs), broker)
 
 
 @router.post("/api/sync-plan/{plan_id}/approve")
@@ -374,10 +429,31 @@ async def approve_sync_plan(plan_id: str, request: Request,
         raise HTTPException(status_code=400, detail="plan is NOT FUNDED — fix funding, regenerate, then approve")
     if oe.plan_age_hours(plan["generated_at"]) > oe.PLAN_MAX_AGE_HOURS:
         raise HTTPException(status_code=400, detail="plan too old — regenerate before approving")
-    mongo_conn.db.sync_plans.update_one(
-        {"plan_id": plan_id},
-        {"$set": {"status": "approved", "approved_at": datetime.now().isoformat()}})
-    return JSONResponse(content={"success": True, "plan_id": plan_id, "status": "approved"})
+    # Approval is the commit point, so this is where the chain is laid out:
+    # single-sided groups, SELLs first, advanced one step per /execute call.
+    set_fields = {"status": "approved", "approved_at": datetime.now().isoformat()}
+    group_size = int((plan.get("settings") or {}).get("group_size") or 0)
+    if group_size > 0:
+        accts = plan.get("accounts") or []
+        if accts:
+            # One chain per account: proceeds are per-account, so budgets are too.
+            per = {}
+            for a in accts:
+                rows = [r for r in plan.get("actions", []) if r.get("account") == a]
+                per[a] = {"groups": oe.build_groups(rows, group_size=group_size),
+                          "cursor": 0, "realized_cash": 0.0, "already_spent": 0.0,
+                          "starting_cash": float(((plan.get("totals") or {})
+                                                  .get("by_account") or {})
+                                                 .get(a, {}).get("available_cash") or 0)}
+            set_fields.update({"by_account": per})
+        else:
+            set_fields.update({
+                "groups": oe.build_groups(plan.get("actions", []), group_size=group_size),
+                "cursor": 0, "realized_cash": 0.0, "already_spent": 0.0})
+    mongo_conn.db.sync_plans.update_one({"plan_id": plan_id}, {"$set": set_fields})
+    return JSONResponse(content={"success": True, "plan_id": plan_id,
+                                 "status": "approved",
+                                 "groups": len(set_fields.get("groups") or [])})
 
 
 @router.get("/api/sync-plan/{plan_id}")
@@ -392,7 +468,7 @@ async def get_sync_plan(plan_id: str, request: Request,
 
 @router.post("/api/sync-plan/{plan_id}/execute")
 async def execute_sync_plan(plan_id: str, request: Request, fraction: float = 0.2,
-                            dry_run: bool = True,
+                            dry_run: bool = True, account: str | None = None,
                             x_api_key: str | None = Header(default=None)):
     """Punch one slice (default 1/5) of an APPROVED plan. dry_run defaults TRUE:
     real orders require dry_run=false AND MH_TRADING_ENABLED=true AND market
@@ -408,26 +484,92 @@ async def execute_sync_plan(plan_id: str, request: Request, fraction: float = 0.
     if errors:
         raise HTTPException(status_code=400, detail="; ".join(errors))
 
-    symbols = [r["symbol"] for r in plan.get("actions", [])]
-    sec_ids = await asyncio.to_thread(_dhan_security_ids, symbols)
-    orders, batch_errors = oe.build_execution_batch(plan, fraction=fraction,
-                                                    security_ids=sec_ids)
+    # ---- group-chained mode (opt-in) ---------------------------------------
+    # A plan carrying `groups` advances exactly ONE step per call: punch a group,
+    # wait for its fills, settle it, then size the next BUY group from the cash
+    # those sells actually realized. Plans without `groups` keep the original
+    # whole-plan slicing behaviour unchanged.
+    # On a routed plan, one /execute call advances ONE account's chain. `account`
+    # selects it; omitted, the next account with pending work is taken.
+    acct_sel = None
+    if plan.get("accounts"):
+        acct_sel = account or oe.next_account_with_work(plan)
+        if acct_sel is None:
+            return JSONResponse(content={"success": True, "plan_id": plan_id,
+                                         "step": "COMPLETE",
+                                         "info": {"reason": "all accounts settled"}})
+        if acct_sel not in plan["accounts"]:
+            raise HTTPException(status_code=400,
+                                detail=f"account '{acct_sel}' is not on this plan")
+
+    group_idx = None
+    chain = oe._chain(plan, acct_sel)
+    if chain.get("groups"):
+        fills: dict = {}
+        if any(g.get("state") == "punched" for g in chain["groups"]):
+            try:
+                book = await asyncio.to_thread(
+                    _broker(plan["broker"], acct_sel or plan.get("account")).orders_today)
+                fills = {o["symbol"]: o for o in book if o.get("symbol")}
+            except BrokerError as e:
+                raise HTTPException(status_code=502, detail=str(e))
+        step, info = oe.advance_plan(plan, fills=fills, account=acct_sel)
+        if step != "PUNCH":
+            # WAIT / SETTLE / STALLED / REPRICE / COMPLETE — persist and report.
+            persist = {"last_executed_at": datetime.now().isoformat()}
+            if acct_sel:
+                persist["by_account"] = plan["by_account"]
+            else:
+                persist.update({"groups": plan["groups"],
+                                "cursor": plan.get("cursor", 0),
+                                "realized_cash": plan.get("realized_cash", 0.0),
+                                "already_spent": plan.get("already_spent", 0.0)})
+            mongo_conn.db.sync_plans.update_one({"plan_id": plan_id}, {"$set": persist})
+            return JSONResponse(content=sanitize_for_json({
+                "success": True, "plan_id": plan_id, "account": acct_sel,
+                "step": step, "info": info}))
+        group_idx = int(chain.get("cursor") or 0)
+
+    if group_idx is not None:
+        g = chain["groups"][group_idx]
+        # Take the CURRENT action rows by seq (they carry punched_qty), applying
+        # any budget trim the buy sizing decided. Using the group's own stored
+        # copies would read a stale punched_qty after a Mongo round-trip.
+        sized_by_seq = {r["seq"]: r["qty"] for r in (g.get("sized_rows") or [])}
+        seqs = {r["seq"] for r in (g.get("sized_rows") or g["rows"])}
+        rows = []
+        for a in plan.get("actions", []):
+            if a["seq"] in seqs:
+                rows.append({**a, "qty": sized_by_seq.get(a["seq"], a["qty"])})
+    else:
+        rows = plan.get("actions", [])
+
+    sec_ids, unresolved = await asyncio.to_thread(
+        _resolve_instruments, rows, plan["broker"])
+    if unresolved:
+        # Refuse rather than guess: an unresolved identity would otherwise be
+        # silently absent from the rebalance.
+        raise HTTPException(status_code=400, detail="; ".join(unresolved))
+    orders, batch_errors, batch_warnings = oe.build_execution_batch(
+        {**plan, "actions": rows}, fraction=fraction, security_ids=sec_ids)
     if batch_errors:
         raise HTTPException(status_code=400, detail="; ".join(batch_errors))
     if not orders:
         return JSONResponse(content={"success": True, "plan_id": plan_id,
-                                     "orders": [], "note": "nothing left to punch"})
+                                     "orders": [], "warnings": batch_warnings,
+                                     "note": "nothing left to punch"})
 
     audit = {"plan_id": plan_id, "mapping_id": plan.get("mapping_id"),
              "broker": plan.get("broker"), "account": plan.get("account", "default"),
              "fraction": fraction, "dry_run": dry_run,
-             "at": datetime.now().isoformat(), "orders": orders, "results": []}
+             "at": datetime.now().isoformat(), "orders": orders,
+             "warnings": batch_warnings, "results": []}
 
     if dry_run:
         mongo_conn.db.execution_log.insert_one(dict(audit))
         return JSONResponse(content=sanitize_for_json({
             "success": True, "plan_id": plan_id, "dry_run": True,
-            "orders": orders,
+            "orders": orders, "warnings": batch_warnings,
             "note": "DRY RUN — nothing sent. Repeat with dry_run=false to punch."}))
 
     # Concurrency lock: two simultaneous execute calls must not double-punch.
@@ -444,7 +586,9 @@ async def execute_sync_plan(plan_id: str, request: Request, fraction: float = 0.
         raise HTTPException(status_code=409,
                             detail="another execution of this plan is in progress")
 
-    client = _broker(plan["broker"], plan.get("account"))
+    # Orders execute in the account the row was routed to — never a plan-level
+    # default, which would place them in the wrong book.
+    client = _broker(plan["broker"], acct_sel or plan.get("account"))
     results = []
     punched_by_seq: dict[int, int] = {}
     aborted_error: str | None = None
@@ -493,12 +637,22 @@ async def execute_sync_plan(plan_id: str, request: Request, fraction: float = 0.
                         if r["seq"] == row["seq"] and r.get("order_id")]
                 row["order_ids"] = ids
         all_done = all(int(r.get("punched_qty") or 0) >= r["qty"] for r in actions)
+        update = {"actions": actions,
+                  "status": "punched" if all_done else "executing",
+                  "last_executed_at": datetime.now().isoformat()}
+        if group_idx is not None:
+            # Mark the group in flight so the NEXT call checks its fills rather
+            # than punching it again.
+            chain["groups"][group_idx]["state"] = "punched"
+            chain["groups"][group_idx]["punched_at"] = datetime.now().isoformat()
+            if acct_sel:
+                update["by_account"] = plan["by_account"]
+            else:
+                update["groups"] = chain["groups"]
+                update["cursor"] = chain.get("cursor", 0)
         mongo_conn.db.sync_plans.update_one(
             {"plan_id": plan_id},
-            {"$set": {"actions": actions,
-                      "status": "punched" if all_done else "executing",
-                      "last_executed_at": datetime.now().isoformat()},
-             "$unset": {"executing_lock": ""}})
+            {"$set": update, "$unset": {"executing_lock": ""}})
 
     ok = sum(1 for r in results if r.get("order_id"))
     if aborted_error:
@@ -521,7 +675,9 @@ async def refresh_sync_plan_status(plan_id: str, request: Request,
     plan = mongo_conn.db.sync_plans.find_one({"plan_id": plan_id})
     if not plan:
         raise HTTPException(status_code=404, detail="plan not found")
-    client = _broker(plan["broker"], plan.get("account"))
+    # Orders execute in the account the row was routed to — never a plan-level
+    # default, which would place them in the wrong book.
+    client = _broker(plan["broker"], acct_sel or plan.get("account"))
     try:
         book = await asyncio.to_thread(client.orders_today)
     except BrokerError as e:

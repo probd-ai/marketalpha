@@ -30,3 +30,4 @@ reportlab==4.2.2
 # --- TradingView price feed — NOT on PyPI; installed from GitHub (MIT).
 # Repo has no release tags; pinned to main SHA (reports version 2.1.0, matches venv).
 tvdatafeed @ git+https://github.com/rongardF/tvdatafeed@e6f6aaa7de439ac6e454d9b26d2760ded8dc4923
+keyring>=25

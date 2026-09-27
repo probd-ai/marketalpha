@@ -1,8 +1,8 @@
 'use client';
 
-// Maps a portfolio to a local folder of broker CSV exports and shows the
-// reconciliation. There is no broker API connection by design -- the user downloads
-// the export and drops it in the folder.
+// Maps a portfolio to its live book and shows the reconciliation. TWO sources:
+// a live broker API connection (authoritative when enabled -- the folder is then
+// ignored entirely), or a local folder of broker CSV exports the user downloads.
 //
 // Two things this UI must never do: imply a stale file is "fine", or present a
 // broker position the strategy never targeted as a SELL. Both are handled by
@@ -19,6 +19,9 @@ export default function LiveHoldingsPanel({ portfolioId }: { portfolioId: string
   const [status, setStatus] = useState<HoldingsStatus | null>(null);
   const [path, setPath] = useState('');
   const [pin, setPin] = useState(true);
+  const [useApi, setUseApi] = useState(false);
+  const [available, setAvailable] = useState<string[]>([]);
+  const [chosen, setChosen] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
@@ -29,12 +32,22 @@ export default function LiveHoldingsPanel({ portfolioId }: { portfolioId: string
       const s = await holdingsApi.status(portfolioId);
       setStatus(s);
       if (s.folder) setPath(s.folder);
+      setUseApi(s.source === 'api');
+      setChosen(s.accounts_configured || []);
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Failed to read holdings');
     }
   }, [portfolioId]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Which accounts actually have credentials stored right now. Offering an account
+  // with none would produce a ticked box that fails on every read.
+  useEffect(() => {
+    holdingsApi.brokerStatus()
+      .then((b) => setAvailable(Object.keys(b.brokers?.dhan?.accounts || {})))
+      .catch(() => setAvailable([]));
+  }, []);
 
   const save = async () => {
     setBusy(true); setErr(null); setSaved(null);
@@ -48,6 +61,31 @@ export default function LiveHoldingsPanel({ portfolioId }: { portfolioId: string
       setBusy(false);
     }
   };
+
+  // Switching source is a single write. Unchecking clears the broker and the
+  // portfolio falls back to the folder; the folder path is never discarded, so the
+  // toggle is reversible without retyping it.
+  const saveSource = async (accounts: string[]) => {
+    setBusy(true); setErr(null); setSaved(null);
+    const prev = chosen;
+    try {
+      await holdingsApi.setLiveSource(portfolioId, accounts.length ? 'dhan' : '', accounts);
+      setChosen(accounts);
+      setUseApi(accounts.length > 0);
+      setSaved(accounts.length
+        ? `Reading live from Dhan — ${accounts.join(' + ')} (unioned).`
+        : 'Switched back to the downloaded file.');
+      await load();
+    } catch (e) {
+      setChosen(prev);       // backend refused; don't leave a box ticked that fails
+      setErr(e instanceof Error ? e.message : 'Failed to change source');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleAccount = (acct: string) =>
+    saveSource(chosen.includes(acct) ? chosen.filter((a) => a !== acct) : [...chosen, acct]);
 
   // Discretionary is stored as a QUANTITY per symbol, so the whole map is written
   // each time rather than a per-symbol toggle.
@@ -101,14 +139,63 @@ export default function LiveHoldingsPanel({ portfolioId }: { portfolioId: string
           </div>
         </div>
         <p className="text-xs text-gray-500">
-          Download the holdings export from your broker into a folder and point this at it.
-          Read fresh on every load; quantities only.
+          {useApi
+            ? 'Reading live from the broker API. Quantities are current as of this request.'
+            : 'Download the holdings export from your broker into a folder and point this at it. Read fresh on every load; quantities only.'}
         </p>
       </CardHeader>
 
       <CardContent className="space-y-4">
-        <div className="space-y-2">
-          <label className="text-xs font-medium text-gray-600">Holdings folder (local path)</label>
+        {/* Source selection. Tick one or more accounts: their holdings are UNIONED,
+            the same way the folder path aggregates several exports. The API wins when
+            any account is connected -- no silent fallback to a possibly stale file. */}
+        <div className="rounded border border-indigo-200 bg-indigo-50/60 px-3 py-2.5 space-y-2">
+          <div className="text-xs font-medium text-gray-800">Connect via broker API (Dhan)</div>
+          {available.length === 0 ? (
+            <p className="text-xs text-gray-500">
+              No Dhan accounts have stored credentials. Run{' '}
+              <code className="font-mono">scripts/credentials.py store DHAN</code> first.
+            </p>
+          ) : (
+            <>
+              <div className="flex flex-wrap gap-x-5 gap-y-1.5">
+                {available.map((acct) => (
+                  <label key={acct} className="flex items-center gap-2 text-xs text-gray-800">
+                    <input
+                      type="checkbox"
+                      checked={chosen.includes(acct)}
+                      disabled={busy}
+                      onChange={() => toggleAccount(acct)}
+                    />
+                    <span className="font-mono">{acct}</span>
+                    {status?.by_account?.[acct] && (
+                      <span className="text-gray-500">
+                        {Object.keys(status.by_account[acct].quantities).length} pos ·{' '}
+                        {'₹'}{Math.round(status.by_account[acct].value).toLocaleString('en-IN')}
+                      </span>
+                    )}
+                  </label>
+                ))}
+              </div>
+              <p className="text-xs text-gray-600">
+                {chosen.length > 1
+                  ? `Holdings from ${chosen.length} accounts are summed into one book. Per-account split is kept, because a SELL can only be placed where the stock actually sits.`
+                  : 'Takes precedence over the downloaded file. Resolves symbols and ISINs directly, and carries the settled / T+1 / pledged split.'}
+              </p>
+            </>
+          )}
+          {(status?.shared_account_with?.length ?? 0) > 0 && (
+            <div className="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+              Also claimed by: {status?.shared_account_with?.join(', ')}. Two portfolios
+              sharing an account cannot be told apart from holdings alone.
+            </div>
+          )}
+        </div>
+
+        <div className={`space-y-2 ${useApi ? 'opacity-50' : ''}`}>
+          <label className="text-xs font-medium text-gray-600">
+            Holdings folder (local path){useApi && ' — ignored while the API is connected'}
+          </label>
           <div className="flex gap-2">
             <Input
               value={path}

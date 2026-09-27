@@ -67,7 +67,7 @@ def test_market_hours():
 
 
 def test_batch_sells_first_and_limit_prices():
-    orders, errs = oe.build_execution_batch(_plan(), fraction=0.2, security_ids=SEC)
+    orders, errs, _ = oe.build_execution_batch(_plan(), fraction=0.2, security_ids=SEC)
     assert errs == []
     assert orders[0]["side"] == "SELL" and orders[0]["qty"] == 2
     assert orders[1]["side"] == "BUY" and orders[1]["qty"] == 20
@@ -75,21 +75,21 @@ def test_batch_sells_first_and_limit_prices():
 
 
 def test_batch_missing_security_id_blocks():
-    orders, errs = oe.build_execution_batch(_plan(), fraction=0.2,
+    orders, errs, _ = oe.build_execution_batch(_plan(), fraction=0.2,
                                             security_ids={"AAA": "111"})
     assert any("BBB" in e and "securityId" in e for e in errs)
 
 
 def test_per_order_cap(monkeypatch):
     monkeypatch.setenv("MH_MAX_ORDER_VALUE", "1000")
-    orders, errs = oe.build_execution_batch(_plan(), fraction=1.0, security_ids=SEC)
+    orders, errs, _ = oe.build_execution_batch(_plan(), fraction=1.0, security_ids=SEC)
     assert any("per-order cap" in e for e in errs)
     monkeypatch.delenv("MH_MAX_ORDER_VALUE")
 
 
 def test_total_execution_cap(monkeypatch):
     monkeypatch.setenv("MH_MAX_EXECUTION_VALUE", "5000")
-    orders, errs = oe.build_execution_batch(_plan(), fraction=1.0, security_ids=SEC)
+    orders, errs, _ = oe.build_execution_batch(_plan(), fraction=1.0, security_ids=SEC)
     assert any("per-run cap" in e for e in errs)
     monkeypatch.delenv("MH_MAX_EXECUTION_VALUE")
 
@@ -97,7 +97,7 @@ def test_total_execution_cap(monkeypatch):
 def test_punched_rows_reduce_next_slice():
     plan = _plan()
     plan["actions"][1]["punched_qty"] = 80
-    orders, errs = oe.build_execution_batch(plan, fraction=0.5, security_ids=SEC)
+    orders, errs, _ = oe.build_execution_batch(plan, fraction=0.5, security_ids=SEC)
     buy = [o for o in orders if o["side"] == "BUY"][0]
     assert buy["qty"] == 20  # ceil(100*0.5)=50 capped by remaining 20
 
@@ -120,7 +120,7 @@ def test_batch_refuses_rows_without_price_basis():
          "order_type": "LIMIT", "limit_price": None, "last_price": None,
          "product": "CNC"},
     ])
-    orders, errors = oe.build_execution_batch(plan, fraction=1.0, security_ids=SEC)
+    orders, errors, _ = oe.build_execution_batch(plan, fraction=1.0, security_ids=SEC)
     assert orders == []
     assert any("price" in e.lower() for e in errors), errors
 

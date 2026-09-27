@@ -49,8 +49,8 @@ def crash_plan(monkeypatch):
     import app.routers.broker as br
     fake = _FakeClient()
     monkeypatch.setattr(br, "_broker", lambda name, account=None: fake)
-    monkeypatch.setattr(br, "_dhan_security_ids",
-                        lambda symbols: {"AAA": "111", "BBB": "222"})
+    monkeypatch.setattr(br, "_resolve_instruments",
+                        lambda rows, broker: ({"AAA": "111", "BBB": "222"}, []))
     yield plan_id
     # TestClient's lifespan closes the shared client on exit — reconnect to clean up
     if mongo_conn.db is None:
