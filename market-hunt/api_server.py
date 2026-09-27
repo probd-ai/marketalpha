@@ -94,6 +94,8 @@ from app.routers import holdings as holdings_routes
 app.include_router(holdings_routes.router)
 from app.routers import rsz as rsz_routes
 app.include_router(rsz_routes.router)
+from app.routers import fund as fund_routes
+app.include_router(fund_routes.router)
 
 # CORS middleware for frontend communication
 app.add_middleware(
