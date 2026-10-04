@@ -37,6 +37,8 @@ from engine.stateless import (
     _parse_filter_groups,
     _short_rebalance,
 )
+from engine.book_adapter import book_run_errors, run_book_simulation
+from fund.config import validate_book
 from wave_engine import run_wave_simulation
 from wave_models import WaveConfig, Signal
 
@@ -55,18 +57,40 @@ class StrategyRule(BaseModel):
     threshold: float
     name: str
 
+class BookConfig(BaseModel):
+    """A fund-desk book run as a simulator strategy (docs/specs/book-strategies-in-simulator.md).
+    kind 'grid10' = value core, 'tranche' = weekly top-N tranches (growth / satellite)."""
+    kind: str
+    params: Dict[str, Any] = {}
+
+    @model_validator(mode="after")
+    def check(self):
+        errs = validate_book(self.kind, self.params)
+        if errs:
+            raise ValueError("; ".join(errs))
+        return self
+
+
 class Strategy(BaseModel):
     id: Optional[str] = None
     name: str
     description: str
     rules: List[StrategyRule]
     wave: Optional[WaveConfig] = None
+    # Book strategy: runs the fund desk engine instead of the stateless / wave engines.
+    book: Optional[BookConfig] = None
     # Rich stateless filter: signal GROUPS (AND within a group, OR across groups),
     # reusing the wave Signal vocabulary (compare / last_cross_dir). When present it
     # supersedes `rules`; absent → legacy rules path.
     filter: Optional[List[List[Signal]]] = None
     created_at: Optional[str] = None
     last_modified: Optional[str] = None
+
+    @model_validator(mode="after")
+    def one_engine(self):
+        if self.book is not None and (self.wave is not None or self.filter or self.rules):
+            raise ValueError("a book strategy cannot also carry rules, a filter or a wave block")
+        return self
 
 class SimulationParams(BaseModel):
     strategy_id: Optional[str] = None  # required for stateless path; optional when wave is provided
@@ -106,6 +130,8 @@ class SimulationParams(BaseModel):
     side: str = "long"  # 'long' (default) | 'short'. Short runs the SAME strategy/selection but sells-to-open: profit when price falls. Inverts position sign across both engines.
     annual_borrow_rate: float = 0.0  # Stock-loan financing cost (decimal/yr, e.g. 0.04 = 4%) accrued daily on short market value. Ignored when side='long'. No margin/dividend-owed modelling in v1.
     wave: Optional[WaveConfig] = None  # When set, route to wave engine instead of stateless path
+    book: Optional[BookConfig] = None  # Ad-hoc book run (unsaved builder); a saved book strategy runs by id alone
+    book_weekday: int = 0  # Book strategies: weekly rebalance session, 0 = Mon .. 4 = Fri
     filter: Optional[List[List[Signal]]] = None  # Rich stateless filter (compare/last_cross_dir groups); supersedes the strategy's rules
     regime_gate: bool = False  # Flatten the book to cash while the gate index is risk-off; re-enter the day it recovers. Long-only.
     gate_symbol: Optional[str] = None  # Gate index override; default "Nifty 500"
@@ -119,8 +145,8 @@ class SimulationParams(BaseModel):
 
     @model_validator(mode="after")
     def require_strategy_id_for_stateless(self):
-        if self.wave is None and not self.strategy_id:
-            raise ValueError("strategy_id is required when wave is not provided")
+        if self.wave is None and self.book is None and not self.strategy_id:
+            raise ValueError("strategy_id is required when wave or book is not provided")
         return self
 
     @model_validator(mode="after")
@@ -323,6 +349,25 @@ async def delete_strategy(strategy_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to delete strategy: {str(e)}")
 
 
+async def _run_book(params: "SimulationParams", book: dict, universe: str) -> JSONResponse:
+    """Run a book strategy on the fund desk engine. Settings the book cannot honour are refused, never ignored."""
+    sent = params.model_dump(exclude_unset=True)
+    errors, ignored = book_run_errors(book, sent)
+    if errors:
+        raise HTTPException(status_code=400, detail="; ".join(errors))
+    logger.info(f"📚 Book strategy ({book['kind']}) — routing to the fund desk engine")
+    try:
+        sim = await asyncio.to_thread(
+            run_book_simulation, mongo_conn.db, book, universe, params.start_date, params.end_date,
+            float(params.portfolio_base_value), float(params.slippage_bps), bool(params.include_brokerage),
+            int(params.book_weekday), params.benchmark_symbol)
+    except ValueError as ve:          # missing membership / benchmark data: the caller's to fix
+        raise HTTPException(status_code=400, detail=str(ve))
+    sim["book"]["ignored_settings"] = ignored
+    return JSONResponse(content={"success": True,
+                                 "simulation": sanitize_for_json({"params": params.dict(), **sim})})
+
+
 def _known_strategy_ids() -> set:
     return {d["id"] for d in mongo_conn.db.simulation_strategies.find({}, {"id": 1})}
 
@@ -373,6 +418,11 @@ async def run_simulation(params: SimulationParams):
         strat_doc = None
         if params.strategy_id:
             strat_doc = mongo_conn.db.simulation_strategies.find_one({"id": params.strategy_id})
+
+        # ── BOOK PATH ──────────────────────────────────────────────────────────
+        effective_book = params.book.model_dump() if params.book else (strat_doc or {}).get("book")
+        if effective_book:
+            return await _run_book(params, effective_book, normalized_universe)
 
         effective_wave = params.wave
         if effective_wave is None and strat_doc and strat_doc.get("wave"):

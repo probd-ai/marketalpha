@@ -46,9 +46,52 @@ interface Strategy {
   wave?: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   filter?: any;
+  // Book strategy: runs the fund desk engine itself (rules empty, no filter/wave).
+  book?: BookBlock | null;
   createdAt: string;
   lastModified: string;
 }
+
+// ── Book engine types (docs/specs/book-strategies-in-simulator.md) ──────────
+type BookKind = 'grid10' | 'tranche';
+
+interface BookBlock {
+  kind: BookKind;
+  params?: Record<string, number | boolean>;
+}
+
+const BOOK_KIND_LABELS: Record<BookKind, string> = {
+  grid10: 'Grid-10 value core',
+  tranche: 'Weekly tranches',
+};
+
+const BOOK_KIND_DESCRIPTIONS: Record<BookKind, string> = {
+  grid10: 'Hold 10 Nifty names: buy the lowest 22-day return among names whose mean_long grid turned up; sell only when the grid turns down and the last month was positive; never trims.',
+  tranche: 'Each week buy the top-N Alpha-eligible names by 22-day return as tranches held N weeks, capped per name.',
+};
+
+// Engine defaults — the backend fills omitted params with the same values.
+const BOOK_DEFAULTS = { n: 10, top: 5, weeks: 8, slot_div: 40, max_w: 0.10, deploy_cash: true };
+
+// Validated point-in-time floor for book runs (backend MODEL_START_FLOOR).
+const BOOK_START_FLOOR = '2020-10-01';
+
+const WEEKDAY_OPTIONS: { value: number; label: string }[] = [
+  { value: 0, label: 'Monday' },
+  { value: 1, label: 'Tuesday' },
+  { value: 2, label: 'Wednesday' },
+  { value: 3, label: 'Thursday' },
+  { value: 4, label: 'Friday' },
+];
+
+// One-line summary of a saved book's params for cards/previews.
+const describeBookParams = (book: BookBlock): string => {
+  const p = book.params ?? {};
+  if (book.kind === 'grid10') return `${p.n ?? BOOK_DEFAULTS.n} names`;
+  const maxW = typeof p.max_w === 'number' ? p.max_w : BOOK_DEFAULTS.max_w;
+  return `top ${p.top ?? BOOK_DEFAULTS.top} · ${p.weeks ?? BOOK_DEFAULTS.weeks} wk hold · slot ÷${p.slot_div ?? BOOK_DEFAULTS.slot_div}`
+    + ` · cap ${(maxW * 100).toFixed(0)}% · ${(p.deploy_cash ?? BOOK_DEFAULTS.deploy_cash) ? 'deploy cash' : 'no cash deploy'}`;
+};
 
 interface SimulationConfig {
   strategyId: string;
@@ -76,6 +119,7 @@ interface SimulationConfig {
   regimeGate: boolean; // Flatten to cash while the gate index closes below its SMA; re-enter on recovery (long-only)
   gateSymbol: string; // Gate index (e.g. "Nifty 500")
   gateSma: number; // SMA length for the gate (trading days)
+  bookWeekday: number; // Book strategies only: weekly rebalance session, 0 = Mon .. 4 = Fri
 }
 
 // ── Wave builder types ──────────────────────────────────────────────────────
@@ -467,7 +511,8 @@ const AnalyticsSimulatorPage = () => {
     pointInTimeMembership: false, // Default: current-snapshot universe (survivorship-biased)
     regimeGate: false, // Default: always invested
     gateSymbol: 'Nifty 500',
-    gateSma: 200
+    gateSma: 200,
+    bookWeekday: 0 // Monday
   });
 
   // Wave builder state
@@ -496,6 +541,58 @@ const AnalyticsSimulatorPage = () => {
     setEntryGroups([]);
     setAccumGroups([]);
     setExitGroups([]);
+  };
+
+  // Book builder state. A book strategy is exclusive: while enabled, the filter and
+  // wave inputs are disabled and never saved (the backend rejects the mix).
+  const [bookOpen, setBookOpen] = useState(false);
+  const [bookEnabled, setBookEnabled] = useState(false);
+  const [bookKind, setBookKind] = useState<BookKind>('grid10');
+  const [bookN, setBookN] = useState(BOOK_DEFAULTS.n);
+  const [bookTop, setBookTop] = useState(BOOK_DEFAULTS.top);
+  const [bookWeeks, setBookWeeks] = useState(BOOK_DEFAULTS.weeks);
+  const [bookSlotDiv, setBookSlotDiv] = useState(BOOK_DEFAULTS.slot_div);
+  const [bookMaxWPct, setBookMaxWPct] = useState(BOOK_DEFAULTS.max_w * 100); // shown as %, sent as a fraction
+  const [bookDeployCash, setBookDeployCash] = useState(BOOK_DEFAULTS.deploy_cash);
+
+  const resetBookState = () => {
+    setBookOpen(false);
+    setBookEnabled(false);
+    setBookKind('grid10');
+    setBookN(BOOK_DEFAULTS.n);
+    setBookTop(BOOK_DEFAULTS.top);
+    setBookWeeks(BOOK_DEFAULTS.weeks);
+    setBookSlotDiv(BOOK_DEFAULTS.slot_div);
+    setBookMaxWPct(BOOK_DEFAULTS.max_w * 100);
+    setBookDeployCash(BOOK_DEFAULTS.deploy_cash);
+  };
+
+  // Same ranges as the fund desk's rule table (fund.config.PARAMS); null when valid.
+  const bookParamError = (): string | null => {
+    const intIn = (v: number, lo: number, hi: number) => Number.isInteger(v) && v >= lo && v <= hi;
+    if (bookKind === 'grid10') {
+      return intIn(bookN, 1, 50) ? null : 'Names must be a whole number 1–50.';
+    }
+    if (!intIn(bookTop, 1, 20)) return 'Top N must be a whole number 1–20.';
+    if (!intIn(bookWeeks, 1, 52)) return 'Hold weeks must be a whole number 1–52.';
+    if (!intIn(bookSlotDiv, 1, 1000)) return 'Slot divisor must be a whole number 1–1000.';
+    if (!(bookMaxWPct >= 1 && bookMaxWPct <= 100)) return 'Per-name cap must be 1–100%.';
+    return null;
+  };
+
+  const buildBookBlock = (): BookBlock | undefined => {
+    if (!bookEnabled) return undefined;
+    if (bookKind === 'grid10') return { kind: 'grid10', params: { n: bookN } };
+    return {
+      kind: 'tranche',
+      params: {
+        top: bookTop,
+        weeks: bookWeeks,
+        slot_div: bookSlotDiv,
+        max_w: Math.round(bookMaxWPct * 100) / 10000, // % → fraction, no float noise
+        deploy_cash: bookDeployCash,
+      },
+    };
   };
 
   const buildWaveBlock = (): object | undefined => {
@@ -642,16 +739,20 @@ const AnalyticsSimulatorPage = () => {
     try {
       setIsLoading(true);
 
+      const bookBlock = buildBookBlock();
       const waveBlock = buildWaveBlock();
       const filterBlock = buildFilterBlock();
-      const strategyData = {
-        name: newStrategyName,
-        description: newStrategyDescription,
-        // Rich filter supersedes flat rules; keep rules empty for filter/wave strategies.
-        rules: filterBlock ? [] : newStrategyRules,
-        ...(filterBlock ? { filter: filterBlock } : {}),
-        ...(waveBlock ? { wave: waveBlock } : {}),
-      };
+      // A book strategy carries only the book: rules empty, no filter, no wave.
+      const strategyData = bookBlock
+        ? { name: newStrategyName, description: newStrategyDescription, rules: [], book: bookBlock }
+        : {
+            name: newStrategyName,
+            description: newStrategyDescription,
+            // Rich filter supersedes flat rules; keep rules empty for filter/wave strategies.
+            rules: filterBlock ? [] : newStrategyRules,
+            ...(filterBlock ? { filter: filterBlock } : {}),
+            ...(waveBlock ? { wave: waveBlock } : {}),
+          };
 
       let response;
       if (editingStrategy) {
@@ -674,6 +775,7 @@ const AnalyticsSimulatorPage = () => {
         setEditingStrategy(null);
         setShowCreateStrategy(false);
         resetWaveState();
+        resetBookState();
       } else {
         setError(editingStrategy ? 'Failed to update strategy' : 'Failed to save strategy');
       }
@@ -688,7 +790,22 @@ const AnalyticsSimulatorPage = () => {
 
   const startSimulation = (strategy: Strategy) => {
     setSelectedStrategy(strategy);
-    setSimulationConfig({ ...simulationConfig, strategyId: strategy.id });
+    if (strategy.book) {
+      // A book run is always point-in-time from the validated floor: snap the start
+      // date forward and off any universe without reconstitution data.
+      const current = universeOptions.find(o => o.value === simulationConfig.universe);
+      const fallback = current && current.pit_eligible === false
+        ? (universeOptions.find(o => o.value === 'NIFTY50' && o.pit_eligible) ?? universeOptions.find(o => o.pit_eligible))
+        : undefined;
+      setSimulationConfig({
+        ...simulationConfig,
+        strategyId: strategy.id,
+        startDate: simulationConfig.startDate < BOOK_START_FLOOR ? BOOK_START_FLOOR : simulationConfig.startDate,
+        universe: fallback ? fallback.value : simulationConfig.universe,
+      });
+    } else {
+      setSimulationConfig({ ...simulationConfig, strategyId: strategy.id });
+    }
     setShowSimulationConfig(true);
   };
 
@@ -727,6 +844,23 @@ const AnalyticsSimulatorPage = () => {
       setExitGroups(groupsFromBlock(w.exit));
     } else {
       resetWaveState();
+    }
+    // Hydrate the book section from the saved book block (same reason as the wave).
+    const b = strategy.book;
+    if (b && typeof b === 'object') {
+      const p = b.params ?? {};
+      const num = (v: unknown, d: number) => (typeof v === 'number' ? v : d);
+      setBookOpen(true);
+      setBookEnabled(true);
+      setBookKind(b.kind === 'tranche' ? 'tranche' : 'grid10');
+      setBookN(num(p.n, BOOK_DEFAULTS.n));
+      setBookTop(num(p.top, BOOK_DEFAULTS.top));
+      setBookWeeks(num(p.weeks, BOOK_DEFAULTS.weeks));
+      setBookSlotDiv(num(p.slot_div, BOOK_DEFAULTS.slot_div));
+      setBookMaxWPct(Math.round(num(p.max_w, BOOK_DEFAULTS.max_w) * 10000) / 100);
+      setBookDeployCash(typeof p.deploy_cash === 'boolean' ? p.deploy_cash : BOOK_DEFAULTS.deploy_cash);
+    } else {
+      resetBookState();
     }
     setShowCreateStrategy(true);
   };
@@ -785,6 +919,17 @@ const AnalyticsSimulatorPage = () => {
       gateSma: simulationConfig.gateSma.toString()
     });
 
+    // A book strategy defines its own schedule and selection: weekly, always
+    // point-in-time, no primary filter or gate (the backend 400s otherwise).
+    // `bookWeekday` in the URL is what marks the run as a book run downstream.
+    if (selectedStrategy?.book) {
+      params.set('rebalanceFreq', 'weekly');
+      params.set('pointInTimeMembership', 'true');
+      params.set('primaryFilterTake', 'none');
+      params.set('regimeGate', 'false');
+      params.set('bookWeekday', simulationConfig.bookWeekday.toString());
+    }
+
     // A run executes the SELECTED saved strategy: the backend reads that
     // strategy's persisted wave block by id (a saved wave strategy runs as a
     // wave automatically). We deliberately do NOT attach the builder's wave
@@ -797,6 +942,15 @@ const AnalyticsSimulatorPage = () => {
 
     window.location.href = `/analytics/simulator/run?${params.toString()}`;
   };
+
+  // The selected strategy runs on the book engine: the run form hides what the
+  // book defines itself and enforces what the backend would otherwise reject.
+  const isBook = !!selectedStrategy?.book;
+  const bookStartTooEarly = isBook && simulationConfig.startDate < BOOK_START_FLOOR;
+  const bookDefinedNote = (
+    <p className="text-xs text-gray-500 italic">Defined by the book — not used for book strategies.</p>
+  );
+  const sweepDisabledTitle = 'Book strategies run on the fund desk engine; the multi-run sweep engine is stateless-only and refuses them.';
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
@@ -827,6 +981,7 @@ const AnalyticsSimulatorPage = () => {
                 setNewStrategyRules([]);
                 setFilterGroups([]);
                 resetWaveState();
+                resetBookState();
                 setShowCreateStrategy(true);
               }}
               className="flex items-center gap-2"
@@ -846,7 +1001,9 @@ const AnalyticsSimulatorPage = () => {
                   <CardTitle className="flex items-center justify-between">
                     <span>{strategy.name}</span>
                     <Badge variant="outline">
-                      {strategy.wave
+                      {strategy.book
+                        ? `Book · ${BOOK_KIND_LABELS[strategy.book.kind] ?? strategy.book.kind}`
+                        : strategy.wave
                         ? 'Wave'
                         : (Array.isArray(strategy.filter) && strategy.filter.length > 0)
                           ? `${(strategy.filter as WaveSignalRow[][]).reduce((s, g) => s + g.length, 0)} conditions`
@@ -874,7 +1031,9 @@ const AnalyticsSimulatorPage = () => {
                       </div>
                     ) : (
                       <div className="text-xs text-gray-500 bg-gray-50 p-2 rounded">
-                        {strategy.wave
+                        {strategy.book
+                          ? `Book (fund desk engine) — ${describeBookParams(strategy.book)}`
+                          : strategy.wave
                           ? '🌊 Wave (tranche accumulate/exit) strategy'
                           : 'Filter strategy — compare / last-cross-direction conditions'}
                       </div>
@@ -935,6 +1094,7 @@ const AnalyticsSimulatorPage = () => {
                     setNewStrategyDescription('');
                     setNewStrategyRules([]);
                     resetWaveState();
+                    resetBookState();
                   }}
                 >
                   Cancel
@@ -966,8 +1126,15 @@ const AnalyticsSimulatorPage = () => {
                 </div>
               </div>
 
+              {bookEnabled && (
+                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                  ⚠ Book engine is on — the book defines selection and exits, so the filter conditions and
+                  wave engine below are disabled and will not be saved. Turn the book off to use them.
+                </p>
+              )}
+
               {/* Filter conditions (stateless qualification) */}
-              <div>
+              <div className={bookEnabled ? 'opacity-40 pointer-events-none' : ''}>
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="text-lg font-medium text-gray-900">Filter conditions</h3>
                   {filterSignalCount() > 0 && (
@@ -991,7 +1158,7 @@ const AnalyticsSimulatorPage = () => {
               </div>
 
               {/* ── Stateful / Wave Builder ────────────────────────────────────── */}
-              <div className="border border-gray-200 rounded-lg">
+              <div className={`border border-gray-200 rounded-lg ${bookEnabled ? 'opacity-40 pointer-events-none' : ''}`}>
                 {/* Collapsible header */}
                 <button
                   type="button"
@@ -1119,6 +1286,148 @@ const AnalyticsSimulatorPage = () => {
                 )}
               </div>
 
+              {/* ── Book engine (fund desk) ────────────────────────────────────── */}
+              <div className="border border-gray-200 rounded-lg">
+                {/* Collapsible header */}
+                <button
+                  type="button"
+                  onClick={() => setBookOpen(o => !o)}
+                  className="flex items-center justify-between w-full px-4 py-3 text-left hover:bg-gray-50 rounded-lg transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <Layers className="h-4 w-4 text-emerald-600" />
+                    <span className="text-sm font-medium text-gray-900">Book Engine</span>
+                    {bookEnabled && (
+                      <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
+                        {BOOK_KIND_LABELS[bookKind]}
+                      </span>
+                    )}
+                  </div>
+                  {bookOpen
+                    ? <ChevronDown className="h-4 w-4 text-gray-500" />
+                    : <ChevronRight className="h-4 w-4 text-gray-500" />}
+                </button>
+
+                {bookOpen && (
+                  <div className="px-4 pb-4 space-y-4 border-t border-gray-100 pt-4">
+                    <p className="text-xs text-gray-500">
+                      Optional — run one of the fund desk&apos;s books on its own engine. A book strategy is
+                      exclusive: it has no filter conditions or wave, and the book defines its schedule
+                      (weekly), holdings and exits.
+                    </p>
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={bookEnabled}
+                        onChange={e => setBookEnabled(e.target.checked)}
+                        className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                      />
+                      Use the book engine for this strategy
+                    </label>
+
+                    <div className={`space-y-3 ${bookEnabled ? '' : 'opacity-40 pointer-events-none'}`}>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Book</label>
+                        <select
+                          value={bookKind}
+                          disabled={!bookEnabled}
+                          onChange={e => setBookKind(e.target.value as BookKind)}
+                          className="w-full md:w-72 p-2 border border-gray-300 rounded-md text-sm"
+                        >
+                          <option value="grid10">{BOOK_KIND_LABELS.grid10}</option>
+                          <option value="tranche">{BOOK_KIND_LABELS.tranche}</option>
+                        </select>
+                        <p className="text-xs text-gray-500 mt-1">{BOOK_KIND_DESCRIPTIONS[bookKind]}</p>
+                      </div>
+
+                      {bookKind === 'grid10' ? (
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Names (1–50)</label>
+                            <input
+                              type="number"
+                              min={1}
+                              max={50}
+                              value={bookN}
+                              disabled={!bookEnabled}
+                              onChange={e => setBookN(parseInt(e.target.value) || BOOK_DEFAULTS.n)}
+                              className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Top N per week (1–20)</label>
+                            <input
+                              type="number"
+                              min={1}
+                              max={20}
+                              value={bookTop}
+                              disabled={!bookEnabled}
+                              onChange={e => setBookTop(parseInt(e.target.value) || BOOK_DEFAULTS.top)}
+                              className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Hold weeks (1–52)</label>
+                            <input
+                              type="number"
+                              min={1}
+                              max={52}
+                              value={bookWeeks}
+                              disabled={!bookEnabled}
+                              onChange={e => setBookWeeks(parseInt(e.target.value) || BOOK_DEFAULTS.weeks)}
+                              className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Slot divisor (1–1000)</label>
+                            <input
+                              type="number"
+                              min={1}
+                              max={1000}
+                              value={bookSlotDiv}
+                              disabled={!bookEnabled}
+                              onChange={e => setBookSlotDiv(parseInt(e.target.value) || BOOK_DEFAULTS.slot_div)}
+                              className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Per-name cap % (1–100)</label>
+                            <input
+                              type="number"
+                              min={1}
+                              max={100}
+                              step={0.5}
+                              value={bookMaxWPct}
+                              disabled={!bookEnabled}
+                              onChange={e => setBookMaxWPct(parseFloat(e.target.value) || BOOK_DEFAULTS.max_w * 100)}
+                              className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                            />
+                          </div>
+                          <div className="flex items-end pb-2">
+                            <label className="flex items-center gap-2 text-xs text-gray-700">
+                              <input
+                                type="checkbox"
+                                checked={bookDeployCash}
+                                disabled={!bookEnabled}
+                                onChange={e => setBookDeployCash(e.target.checked)}
+                                className="h-3 w-3 rounded border-gray-300"
+                              />
+                              Deploy idle cash
+                            </label>
+                          </div>
+                        </div>
+                      )}
+                      {bookEnabled && bookParamError() && (
+                        <p className="text-xs text-red-600">{bookParamError()}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Save Button */}
               <div className="flex justify-end gap-3 pt-6 border-t">
                 <Button
@@ -1126,15 +1435,18 @@ const AnalyticsSimulatorPage = () => {
                   onClick={() => {
                     setShowCreateStrategy(false);
                     resetWaveState();
+                    resetBookState();
                   }}
                 >
                   Cancel
                 </Button>
                 <Button
                   onClick={saveStrategy}
-                  // Valid if it has a name AND defines either filter conditions OR a
-                  // wave (>=1 entry signal).
-                  disabled={!newStrategyName || (filterSignalCount() === 0 && entryGroups.reduce((s, g) => s + g.length, 0) === 0)}
+                  // Valid if it has a name AND defines either a valid book, filter
+                  // conditions, OR a wave (>=1 entry signal).
+                  disabled={!newStrategyName || (bookEnabled
+                    ? bookParamError() !== null
+                    : (filterSignalCount() === 0 && entryGroups.reduce((s, g) => s + g.length, 0) === 0))}
                   className="flex items-center gap-2"
                 >
                   <Target className="h-4 w-4" />
@@ -1176,6 +1488,21 @@ const AnalyticsSimulatorPage = () => {
                   </p>
                 </div>
               )}
+              {/* Book strategy notice — the book defines its own schedule and selection */}
+              {selectedStrategy.book && (
+                <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+                  <div className="font-medium mb-1">
+                    Book strategy — {BOOK_KIND_LABELS[selectedStrategy.book.kind] ?? selectedStrategy.book.kind}
+                  </div>
+                  <p>
+                    Runs on the fund desk engine ({describeBookParams(selectedStrategy.book)}).
+                    It rebalances <strong>weekly</strong> on the weekday you pick, is always
+                    <strong> point-in-time</strong>, and starts no earlier than <strong>{BOOK_START_FLOOR}</strong>.
+                    <strong> Portfolio Base Value, Universe, Benchmark and dates</strong> apply; holdings, ranking,
+                    allocation, primary filter and gates are defined by the book.
+                  </p>
+                </div>
+              )}
               {/* Portfolio Settings */}
               <div>
                 <h3 className="text-lg font-medium text-gray-900 mb-4">Portfolio Settings</h3>
@@ -1210,7 +1537,7 @@ const AnalyticsSimulatorPage = () => {
                       {universeOptions.map((option) => {
                         // Block universes without reconstitution data while PIT
                         // is on — they cannot run rebalance-aware and would 400.
-                        const blocked = simulationConfig.pointInTimeMembership && option.pit_eligible === false;
+                        const blocked = (simulationConfig.pointInTimeMembership || isBook) && option.pit_eligible === false;
                         return (
                           <option key={option.value} value={option.value} disabled={blocked}>
                             {option.label}{blocked ? ' — no PIT data' : ''}
@@ -1254,7 +1581,8 @@ const AnalyticsSimulatorPage = () => {
                       Rebalance Frequency
                     </label>
                     <select
-                      value={simulationConfig.rebalanceFrequency}
+                      value={isBook ? 'weekly' : simulationConfig.rebalanceFrequency}
+                      disabled={isBook}
                       onChange={(e) => setSimulationConfig({
                         ...simulationConfig,
                         rebalanceFrequency: e.target.value as SimulationConfig['rebalanceFrequency']
@@ -1266,8 +1594,33 @@ const AnalyticsSimulatorPage = () => {
                       <option value="quarterly">Quarterly</option>
                       <option value="dynamic">Dynamic (immediate)</option>
                     </select>
+                    {isBook && (
+                      <p className="text-xs text-gray-500 mt-1">Book strategies always rebalance weekly.</p>
+                    )}
                   </div>
-                  
+
+                  {isBook ? (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Rebalance Weekday
+                      </label>
+                      <select
+                        value={simulationConfig.bookWeekday}
+                        onChange={(e) => setSimulationConfig({
+                          ...simulationConfig,
+                          bookWeekday: parseInt(e.target.value)
+                        })}
+                        className="w-full p-2 border border-gray-300 rounded-md"
+                      >
+                        {WEEKDAY_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-gray-500 mt-1">
+                        The session of each week the book rebalances on.
+                      </p>
+                    </div>
+                  ) : (
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                       Rebalance Date
@@ -1285,9 +1638,16 @@ const AnalyticsSimulatorPage = () => {
                       <option value="last">Last available date</option>
                     </select>
                   </div>
+                  )}
                 </div>
-                
+
                 {/* Rebalance Type Setting */}
+                {isBook ? (
+                  <div className="mt-6">
+                    <h4 className="text-base font-medium text-gray-900 mb-3">Allocation Method</h4>
+                    {bookDefinedNote}
+                  </div>
+                ) : (
                 <div className="mt-6">
                   <h4 className="text-base font-medium text-gray-900 mb-3">Allocation Method</h4>
                   <div>
@@ -1313,6 +1673,7 @@ const AnalyticsSimulatorPage = () => {
                     </p>
                   </div>
                 </div>
+                )}
 
                 {/* Point-in-time membership */}
                 <div className="mt-6">
@@ -1321,7 +1682,8 @@ const AnalyticsSimulatorPage = () => {
                     <input
                       type="checkbox"
                       id="pointInTimeMembership"
-                      checked={simulationConfig.pointInTimeMembership}
+                      checked={simulationConfig.pointInTimeMembership || isBook}
+                      disabled={isBook}
                       onChange={(e) => {
                         const enabled = e.target.checked;
                         // When enabling PIT, snap off any universe that lacks
@@ -1356,10 +1718,17 @@ const AnalyticsSimulatorPage = () => {
                     Use the index constituents that existed at each rebalance date instead of today&apos;s list —
                     removes survivorship/look-ahead bias. Requires loaded reconstitution data
                     ({universeOptions.filter(o => o.pit_eligible).length} of {universeOptions.length} universes qualify; others are disabled while this is on).
+                    {isBook && ' Always on for book strategies.'}
                   </p>
                 </div>
 
                 {/* Regime gate */}
+                {isBook ? (
+                  <div className="mt-6">
+                    <h4 className="text-base font-medium text-gray-900 mb-3">Regime Gate</h4>
+                    {bookDefinedNote}
+                  </div>
+                ) : (
                 <div className="mt-6">
                   <h4 className="text-base font-medium text-gray-900 mb-3">Regime Gate</h4>
                   <div className="flex items-center gap-3">
@@ -1412,9 +1781,16 @@ const AnalyticsSimulatorPage = () => {
                     </div>
                   )}
                 </div>
+                )}
               </div>
 
               {/* Primary Filter — runs AFTER the strategy filter, BEFORE momentum ranking */}
+              {isBook ? (
+                <div>
+                  <h3 className="text-lg font-medium text-gray-900 mb-1">Primary Filter</h3>
+                  {bookDefinedNote}
+                </div>
+              ) : (
               <div>
                 <h3 className="text-lg font-medium text-gray-900 mb-1">Primary Filter</h3>
                 <p className="text-xs text-gray-500 mb-4">
@@ -1509,8 +1885,15 @@ const AnalyticsSimulatorPage = () => {
                   </p>
                 )}
               </div>
+              )}
 
               {/* Portfolio Limit Settings */}
+              {isBook ? (
+                <div>
+                  <h3 className="text-lg font-medium text-gray-900 mb-1">Portfolio Limit Settings</h3>
+                  {bookDefinedNote}
+                </div>
+              ) : (
               <div>
                 <h3 className="text-lg font-medium text-gray-900 mb-4">Portfolio Limit Settings</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1578,6 +1961,7 @@ const AnalyticsSimulatorPage = () => {
                   </div>
                 </div>
               </div>
+              )}
 
               {/* Simulation Period */}
               <div>
@@ -1589,12 +1973,18 @@ const AnalyticsSimulatorPage = () => {
                     </label>
                     <Input
                       type="date"
+                      min={isBook ? BOOK_START_FLOOR : undefined}
                       value={simulationConfig.startDate}
                       onChange={(e) => setSimulationConfig({
                         ...simulationConfig,
                         startDate: e.target.value
                       })}
                     />
+                    {isBook && (
+                      <p className={`text-xs mt-1 ${bookStartTooEarly ? 'text-red-600' : 'text-gray-500'}`}>
+                        Book strategies start on or after {BOOK_START_FLOOR} (validated point-in-time membership).
+                      </p>
+                    )}
                   </div>
                   
                   <div>
@@ -1619,6 +2009,15 @@ const AnalyticsSimulatorPage = () => {
                 <div className="bg-gray-50 p-4 rounded-lg">
                   <h4 className="font-medium text-gray-800 mb-2">{selectedStrategy.name}</h4>
                   <p className="text-sm text-gray-600 mb-3">{selectedStrategy.description}</p>
+                  {selectedStrategy.book && (
+                    <div className="text-sm bg-white p-2 rounded border">
+                      <span className="font-medium">
+                        {BOOK_KIND_LABELS[selectedStrategy.book.kind] ?? selectedStrategy.book.kind}
+                      </span>
+                      <span className="mx-2 text-gray-400">·</span>
+                      <span>{describeBookParams(selectedStrategy.book)}</span>
+                    </div>
+                  )}
                   <div className="space-y-1">
                     {selectedStrategy.rules.map((rule) => (
                       <div key={rule.id} className="text-sm bg-white p-2 rounded border">
@@ -1641,6 +2040,8 @@ const AnalyticsSimulatorPage = () => {
                 >
                   Cancel
                 </Button>
+                {/* A disabled button swallows hover (pointer-events-none), so the tooltip lives on a wrapper. */}
+                <span title={isBook ? sweepDisabledTitle : undefined}>
                 <Button 
                   onClick={() => {
                     // Navigate to time-period multi-run page
@@ -1660,12 +2061,15 @@ const AnalyticsSimulatorPage = () => {
                     const encodedParams = encodeURIComponent(JSON.stringify(params));
                     window.location.href = `/analytics/simulator/multi-run?params=${encodedParams}`;
                   }}
+                  disabled={isBook}
                   variant="outline"
                   className="flex items-center gap-2"
                 >
                   <Layers className="h-4 w-4" />
                   ML Simulation
                 </Button>
+                </span>
+                <span title={isBook ? sweepDisabledTitle : undefined}>
                 <Button 
                   onClick={() => {
                     // Navigate to holdings multi-dimension page
@@ -1689,19 +2093,24 @@ const AnalyticsSimulatorPage = () => {
                     const encodedParams = encodeURIComponent(JSON.stringify(params));
                     window.location.href = `/analytics/simulator/holdings-multi-run?params=${encodedParams}`;
                   }}
+                  disabled={isBook}
                   variant="outline"
                   className="flex items-center gap-2"
                 >
                   <Target className="h-4 w-4" />
                   Multi-Dimension Holdings
                 </Button>
-                <Button 
+                </span>
+                <span title={bookStartTooEarly ? `Book strategies start on or after ${BOOK_START_FLOOR}` : undefined}>
+                <Button
                   onClick={runSimulation}
+                  disabled={bookStartTooEarly}
                   className="flex items-center gap-2"
                 >
                   <Play className="h-4 w-4" />
                   Start Simulation
                 </Button>
+                </span>
               </div>
             </CardContent>
           </Card>

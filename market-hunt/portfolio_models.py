@@ -24,6 +24,7 @@ class Sleeve(BaseModel):
     stock_gate: bool = False               # per-stock fib eligibility gate
     portfolio_gate: bool = False           # self-gate on the equity curve
     exchange: str = "NSE"
+    book_weekday: int = 0                  # book strategies only: weekly session, 0 = Mon .. 4 = Fri
 
 
 class Portfolio(BaseModel):

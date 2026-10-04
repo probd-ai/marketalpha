@@ -729,8 +729,18 @@ async def select_top_stocks_by_momentum(qualified_stocks: list, current_holdings
                      if stock["symbol"] not in current_holdings]
         return limited_stocks, new_stocks, []
 
+def _refuse_book(strategy) -> None:
+    """A book strategy (fund desk engine) carries no rules: run here it would silently hold whatever qualifies.
+    Every caller of the stateless engine — multi-run sweeps, walk-forward, portfolio sleeves — is covered here."""
+    if (strategy or {}).get("book"):
+        raise ValueError(f"strategy {strategy.get('id')!r} is a book strategy ({strategy['book'].get('kind')}); "
+                         "it runs on the fund desk engine via /api/simulation/run or a portfolio sleeve, not on "
+                         "the stateless engine")
+
+
 async def run_strategy_simulation_debug(data_manager, strategy, universe_symbols, params):
     """Debug version of simulation with extensive logging"""
+    _refuse_book(strategy)
     try:
         logger.info(f"🔍 DEBUG: Starting simulation with {len(universe_symbols)} symbols")
         indicators_coll = data_manager.db[data_manager.indicators_collection]
@@ -1299,6 +1309,7 @@ async def run_strategy_simulation(data_manager, strategy, universe_symbols, para
     rebalance is gated to the index members as-of that date, and holdings that have
     left the index are force-exited — making the run survivorship-bias-free.
     """
+    _refuse_book(strategy)
     try:
         # Initialize cumulative charges as a local variable scoped to this call
         # (was a function attribute — shared mutable state, unsafe under concurrency)

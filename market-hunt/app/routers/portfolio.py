@@ -151,7 +151,9 @@ def _portfolio_config_hash(p: dict) -> str:
     for s in p.get("sleeves", []):
         entry = {k: s.get(k) for k in _SLEEVE_HASH_KEYS}
         entry["strategy_def"] = mongo_conn.db.simulation_strategies.find_one(
-            {"id": s.get("strategy_id")}, {"_id": 0, "filter": 1, "rules": 1, "wave": 1})
+            {"id": s.get("strategy_id")}, {"_id": 0, "filter": 1, "rules": 1, "wave": 1, "book": 1})
+        if (entry["strategy_def"] or {}).get("book"):   # only book sleeves read it; keeps other hashes unchanged
+            entry["book_weekday"] = int(s.get("book_weekday", 0) or 0)
         cfg["sleeves"].append(entry)
     return hashlib.sha256(_json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -226,6 +228,28 @@ def _symbol_meta_for(symbols: set[str]) -> dict:
     return meta
 
 
+async def _run_book_sleeve(sleeve: dict, book: dict, inception: str, as_of: str, total_capital: float,
+                           pit: bool, offset_sessions: int):
+    """A sleeve whose strategy is a book runs on the fund desk engine (docs/specs/book-strategies-in-simulator.md).
+    Gates, the lag knob and a survivorship-biased universe are refused for it, never silently dropped."""
+    from engine.book_adapter import book_run_errors, run_book_simulation
+    run_cfg = {"start_date": inception, "end_date": as_of, "point_in_time_membership": pit,
+               "book_weekday": int(sleeve.get("book_weekday", 0) or 0),
+               "rebalance_offset_sessions": int(offset_sessions or 0),
+               **{k: bool(sleeve.get(k, False)) for k in ("regime_gate", "stock_gate", "portfolio_gate")}}
+    errors, _ = book_run_errors(book, run_cfg)
+    if errors:
+        raise HTTPException(status_code=400, detail=f"sleeve '{sleeve['label']}': " + "; ".join(errors))
+    try:
+        run = await asyncio.to_thread(
+            run_book_simulation, mongo_conn.db, book, sleeve["universe"], inception, as_of,
+            round(total_capital * float(sleeve["weight"]) / 100), float(sleeve.get("slippage_bps", 0) or 0),
+            bool(sleeve.get("include_brokerage", True)), run_cfg["book_weekday"], "Nifty 50")
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=f"sleeve '{sleeve['label']}': {ve}")
+    return ({"id": sleeve["id"], "label": sleeve["label"], "weight": sleeve["weight"]}, run)
+
+
 async def _compute_portfolio_run(portfolio: dict, inception: str, as_of: str,
                                  offset_sessions: int = 0) -> dict:
     """Heavy computation extracted from run_portfolio — no DB re-query, pure compute."""
@@ -239,6 +263,10 @@ async def _compute_portfolio_run(portfolio: dict, inception: str, as_of: str,
         strategy = mongo_conn.db.simulation_strategies.find_one({"id": sleeve["strategy_id"]})
         if not strategy:
             raise HTTPException(status_code=400, detail=f"strategy {sleeve['strategy_id']} not found")
+
+        if strategy.get("book"):
+            return await _run_book_sleeve(sleeve, strategy["book"], inception, as_of, total_capital, pit,
+                                          offset_sessions)
 
         universe = sleeve["universe"]
         params = SimulationParams(
@@ -514,6 +542,12 @@ def _preview_sleeve_sync(sleeve: dict, pit: bool, current_holdings: list[str]) -
     strategy = db.simulation_strategies.find_one({"id": sleeve["strategy_id"]})
     if not strategy:
         raise HTTPException(status_code=400, detail=f"strategy {sleeve['strategy_id']} not found")
+    if strategy.get("book"):
+        # The equal-weight "probable adds" preview would misstate a book (no trims, tranche caps). Book sleeves
+        # are traded from the fund desk, which projects the real next-session orders.
+        raise HTTPException(status_code=400, detail=(
+            f"sleeve '{sleeve.get('label')}' runs a book strategy; the rebalance preview and plan are not "
+            "available for book sleeves — use the fund desk ticket"))
     universe = sleeve["universe"]
 
     # Universe as of today.

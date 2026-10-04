@@ -32,6 +32,17 @@ const MOMENTUM_OPTIONS: { value: string; label: string }[] = [
   { value: 'stock_score_roc', label: 'StockScore ROC' },
 ];
 
+const WEEKDAY_OPTIONS: { value: number; label: string }[] = [
+  { value: 0, label: 'Monday' },
+  { value: 1, label: 'Tuesday' },
+  { value: 2, label: 'Wednesday' },
+  { value: 3, label: 'Thursday' },
+  { value: 4, label: 'Friday' },
+];
+
+// Settings a book strategy defines itself (or refuses: gates) — reset/forced for book sleeves.
+const BOOK_SLEEVE_PATCH: Partial<Sleeve> = { regime_gate: false, stock_gate: false, portfolio_gate: false };
+
 const inputCls = 'w-full p-2 border border-gray-300 rounded-md text-sm bg-white/70';
 const labelCls = 'block text-xs font-medium text-gray-600 mb-1';
 
@@ -79,6 +90,9 @@ export default function PortfolioForm({ initial }: Props) {
   const setField = <K extends keyof Portfolio>(key: K, value: Portfolio[K]) =>
     setPortfolio((p) => ({ ...p, [key]: value }));
 
+  // A book strategy runs on the fund desk engine: weekly on `book_weekday`, gates off.
+  const isBookStrategy = (strategyId: string) => Boolean(strategies.find((st) => st.id === strategyId)?.book);
+
   const setSleeve = (idx: number, patch: Partial<Sleeve>) =>
     setPortfolio((p) => ({
       ...p,
@@ -115,13 +129,21 @@ export default function PortfolioForm({ initial }: Props) {
     if (!portfolio.name.trim()) return setError('Portfolio needs a name.');
     if (!weightsOk) return setError(`Sleeve weights must sum to 100 (currently ${weightSum}).`);
     if (portfolio.sleeves.some((s) => !s.strategy_id)) return setError('Every sleeve needs a strategy.');
+    // Book sleeves: gates are refused by the backend and hidden here, so force them off
+    // and always send the weekday (default Monday).
+    const payload: Portfolio = {
+      ...portfolio,
+      sleeves: portfolio.sleeves.map((s) =>
+        isBookStrategy(s.strategy_id) ? { ...s, ...BOOK_SLEEVE_PATCH, book_weekday: s.book_weekday ?? 0 } : s
+      ),
+    };
     setSaving(true);
     try {
       if (editing && portfolio.id) {
-        await portfolioApi.update(portfolio.id, portfolio);
+        await portfolioApi.update(portfolio.id, payload);
         router.push(`/analytics/portfolios/${portfolio.id}`);
       } else {
-        const res = await portfolioApi.create(portfolio);
+        const res = await portfolioApi.create(payload);
         router.push(`/analytics/portfolios/${res.portfolio_id}`);
       }
     } catch (e) {
@@ -209,7 +231,9 @@ export default function PortfolioForm({ initial }: Props) {
           </Button>
         </CardHeader>
         <CardContent className="space-y-4">
-          {portfolio.sleeves.map((s, idx) => (
+          {portfolio.sleeves.map((s, idx) => {
+            const book = isBookStrategy(s.strategy_id);
+            return (
             <div key={s.id} className="rounded-lg border border-gray-200 bg-white/50 p-4">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
@@ -241,14 +265,19 @@ export default function PortfolioForm({ initial }: Props) {
                   <select
                     className={inputCls}
                     value={s.strategy_id}
-                    onChange={(e) => setSleeve(idx, { strategy_id: e.target.value })}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      setSleeve(idx, isBookStrategy(id)
+                        ? { strategy_id: id, ...BOOK_SLEEVE_PATCH, book_weekday: s.book_weekday ?? 0 }
+                        : { strategy_id: id });
+                    }}
                   >
                     <option value="" disabled>
                       select…
                     </option>
                     {strategies.map((st) => (
                       <option key={st.id} value={st.id}>
-                        {st.name}
+                        {st.name}{st.book ? ` (book · ${st.book.kind})` : ''}
                       </option>
                     ))}
                   </select>
@@ -281,6 +310,28 @@ export default function PortfolioForm({ initial }: Props) {
                     onChange={(e) => setSleeve(idx, { weight: Number(e.target.value) })}
                   />
                 </div>
+                {book ? (
+                  <>
+                    <div>
+                      <label className={labelCls}>Rebalance weekday</label>
+                      <select
+                        className={inputCls}
+                        value={s.book_weekday ?? 0}
+                        onChange={(e) => setSleeve(idx, { book_weekday: Number(e.target.value) })}
+                      >
+                        {WEEKDAY_OPTIONS.map((w) => (
+                          <option key={w.value} value={w.value}>
+                            {w.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="col-span-2 md:col-span-3 lg:col-span-4 flex items-end pb-2 text-xs italic text-gray-500">
+                      Weekly schedule, holdings, weighting, ranking and gates are defined by the book.
+                    </div>
+                  </>
+                ) : (
+                <>
                 <div>
                   <label className={labelCls}>Rebalance</label>
                   <select
@@ -407,6 +458,8 @@ export default function PortfolioForm({ initial }: Props) {
                     </label>
                   </div>
                 </div>
+                </>
+                )}
                 <div>
                   <label className={labelCls}>Slippage (bps/side)</label>
                   <input
@@ -430,7 +483,8 @@ export default function PortfolioForm({ initial }: Props) {
                 </div>
               </div>
             </div>
-          ))}
+            );
+          })}
         </CardContent>
       </Card>
 

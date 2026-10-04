@@ -37,6 +37,8 @@ interface SimulationParams {
   primaryFilterBand?: number;
   startDate: string;
   endDate: string;
+  // Book strategies only (0 = Mon .. 4 = Fri): a re-run must stay on the same weekday.
+  bookWeekday?: number | null;
 }
 
 interface HoldingStock {
@@ -52,6 +54,7 @@ interface HoldingStock {
   weight?: number;
   holdingPeriods?: number;
   allocationWeight?: number;
+  exitReason?: string; // Book runs: why the position was closed
 }
 
 interface DayResult {
@@ -145,7 +148,7 @@ const DetailedViewContent = () => {
       setIsLoading(true);
       setError(null);
       
-      const apiParams = {
+      const apiParams: Record<string, unknown> = {
         strategy_id: params.strategyId,
         portfolio_base_value: params.portfolioValue,
         rebalance_frequency: params.rebalanceFreq,
@@ -161,6 +164,16 @@ const DetailedViewContent = () => {
         start_date: params.startDate,
         end_date: params.endDate
       };
+      // Book run: same shape as the parent run page — weekly on the saved weekday,
+      // without the settings the book defines itself.
+      if (params.bookWeekday != null) {
+        apiParams.rebalance_frequency = 'weekly';
+        apiParams.book_weekday = params.bookWeekday;
+        delete apiParams.rebalance_date;
+        delete apiParams.rebalance_type;
+        delete apiParams.max_holdings;
+        delete apiParams.momentum_ranking;
+      }
       
       const response = await api.runSimulation(apiParams);
       
@@ -197,7 +210,8 @@ const DetailedViewContent = () => {
               marketValue: exit.quantity * exit.exit_price,
               pnl: exit.pnl,
               pnlPercent: exit.pnl_percent,
-              sector: exit.sector
+              sector: exit.sector,
+              exitReason: exit.exit_reason
             })),
             cash: day.cash,
             totalPnL: day.total_pnl,
@@ -522,6 +536,9 @@ const DetailedViewContent = () => {
                                     P&L: ₹{exit.pnl.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
                                   </div>
                                 </div>
+                                {exit.exitReason && (
+                                  <div className="text-xs text-red-600 mt-1">Exit: {exit.exitReason}</div>
+                                )}
                               </div>
                             ))
                           ) : dayResult.exited.length > 0 ? (

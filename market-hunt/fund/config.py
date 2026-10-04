@@ -112,19 +112,7 @@ def validate(cfg: dict, today: date, universes: set | None = None, symbols: set 
             uni = s.get("universe")
             if not isinstance(uni, str) or (universes is not None and uni not in universes):
                 errors.append(f"{tag}: universe {uni!r} has no point-in-time membership data")
-        params = s.get("params") or {}
-        if not isinstance(params, dict):
-            errors.append(f"{tag}: params must be an object")
-            continue
-        for k, v in params.items():
-            spec = PARAMS[kind].get(k)
-            if spec is None:
-                errors.append(f"{tag}: unknown parameter {k!r}")
-            elif spec[0] is bool:
-                if not isinstance(v, bool):
-                    errors.append(f"{tag}: {k} must be true/false")
-            elif not _num(v, spec[1], spec[2], integer=spec[0] is int):
-                errors.append(f"{tag}: {k} must be between {spec[1]} and {spec[2]}")
+        errors += [f"{tag}: {e}" for e in _param_errors(kind, s.get("params") or {})]
     if len(set(ids)) != len(ids):
         errors.append("sleeve ids must be unique")
     try:
@@ -134,6 +122,32 @@ def validate(cfg: dict, today: date, universes: set | None = None, symbols: set 
     except (TypeError, ValueError):
         errors.append("sleeve weights must be numbers")
     return errors
+
+
+def _param_errors(kind: str, params) -> list[str]:
+    if not isinstance(params, dict):
+        return ["params must be an object"]
+    errors = []
+    for k, v in params.items():
+        spec = PARAMS[kind].get(k)
+        if spec is None:
+            errors.append(f"unknown parameter {k!r}")
+        elif spec[0] is bool:
+            if not isinstance(v, bool):
+                errors.append(f"{k} must be true/false")
+        elif not _num(v, spec[1], spec[2], integer=spec[0] is int):
+            errors.append(f"{k} must be between {spec[1]} and {spec[2]}")
+    return errors
+
+
+BOOK_KINDS = ("grid10", "tranche")      # stock-book kinds a simulator strategy can run (assets are fund-only)
+
+
+def validate_book(kind, params) -> list[str]:
+    """A simulator book strategy's kind + params, checked by the same rule table as the fund desk's sleeves."""
+    if kind not in BOOK_KINDS:
+        return [f"unknown kind {kind!r} (expected one of {', '.join(BOOK_KINDS)})"]
+    return _param_errors(kind, params)
 
 
 def next_version(old: dict, new: dict) -> int:

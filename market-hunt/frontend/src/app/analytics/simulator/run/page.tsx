@@ -58,6 +58,9 @@ interface SimulationParams {
   regimeGate: boolean; // Flatten to cash while gate index < its SMA; re-enter on recovery (long-only)
   gateSymbol?: string; // Gate index override (default backend: "Nifty 500")
   gateSma: number; // SMA length for the gate (default 200)
+  // Book strategies only: weekly rebalance session (0 = Mon .. 4 = Fri). Present
+  // exactly when the builder launched a book run; null for every other run.
+  bookWeekday?: number | null;
 }
 
 interface HoldingStock {
@@ -74,6 +77,7 @@ interface HoldingStock {
   holdingPeriods?: number; // Number of consecutive rebalance periods held
   allocationWeight?: number; // Skewed allocation weight (1.0 + periods * 0.3)
   side?: 'long' | 'short'; // Position direction; 'short' positions profit when price falls
+  exitReason?: string; // Book runs: why the position was closed (e.g. GRID_DOWN_POSITIVE_MONTH)
 }
 
 interface DayResult {
@@ -133,8 +137,24 @@ interface WaveDiagnostics {
   pct_deployed_series: number[];
 }
 
+// `simulation.book` block of a book strategy run (fund desk engine).
+interface BookRunInfo {
+  kind: string;
+  params?: Record<string, number | boolean>;
+  weekday?: number;
+  engine_version?: string | number;
+  execution?: string;
+  order_reasons?: Record<string, number>;
+  universe?: string;
+  slippage_bps?: number;
+  ignored_settings?: string[];
+}
+
+const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+
 interface SimulationResult {
   params: SimulationParams;
+  book?: BookRunInfo | null;
   benchmark_symbol: string;  // Actual benchmark symbol used
   waveDiagnostics?: WaveDiagnostics | null;
   results: DayResult[];
@@ -265,7 +285,8 @@ const SimulationRunnerContent = () => {
       annualBorrowRate: parseFloat(searchParams.get('annualBorrowRate') || '0.04'),
       regimeGate: searchParams.get('regimeGate') === 'true',
       gateSymbol: searchParams.get('gateSymbol') || undefined,
-      gateSma: parseInt(searchParams.get('gateSma') || '200')
+      gateSma: parseInt(searchParams.get('gateSma') || '200'),
+      bookWeekday: searchParams.get('bookWeekday') !== null ? parseInt(searchParams.get('bookWeekday') || '0') : null
     };
     
     // If no benchmark symbol in URL, update the URL to include the default
@@ -318,7 +339,7 @@ const SimulationRunnerContent = () => {
       }
       
       // Convert params to the format expected by the API
-      const apiParams = {
+      const apiParams: Record<string, unknown> = {
         strategy_id: params.strategyId,
         portfolio_base_value: params.portfolioValue,
         rebalance_frequency: params.rebalanceFreq,
@@ -342,12 +363,23 @@ const SimulationRunnerContent = () => {
         gate_sma: params.gateSma
       };
 
+      // A book run: weekly on the chosen weekday. Drop the settings the book defines
+      // itself (holdings, ranking, allocation, rebalance date) so the backend does not
+      // report them as ignored — the book, not this form, decides them.
+      if (params.bookWeekday != null) {
+        apiParams.rebalance_frequency = 'weekly';
+        apiParams.book_weekday = params.bookWeekday;
+        delete apiParams.rebalance_date;
+        delete apiParams.rebalance_type;
+        delete apiParams.max_holdings;
+        delete apiParams.momentum_ranking;
+      }
+
       // Attach wave config if the wave builder was used (routes to wave engine on backend)
       try {
         const pendingWave = sessionStorage.getItem('pendingWaveConfig');
         if (pendingWave) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (apiParams as any).wave = JSON.parse(pendingWave);
+          apiParams.wave = JSON.parse(pendingWave);
           sessionStorage.removeItem('pendingWaveConfig');
         }
       } catch {
@@ -392,7 +424,8 @@ const SimulationRunnerContent = () => {
               marketValue: exit.quantity * exit.exit_price,
               pnl: exit.pnl,
               pnlPercent: exit.pnl_percent,
-              sector: exit.sector
+              sector: exit.sector,
+              exitReason: exit.exit_reason
             })),
             cash: day.cash,
             totalPnL: day.total_pnl,
@@ -412,6 +445,8 @@ const SimulationRunnerContent = () => {
           // Point-in-time membership flags
           pointInTime: response.simulation.point_in_time || false,
           pointInTimeCoverage: response.simulation.point_in_time_coverage || null,
+          // Book strategy run info (only present for book strategy runs)
+          book: response.simulation.book || null,
           summary: {
             totalReturn: response.simulation.summary.total_return,
             benchmarkReturn: response.simulation.summary.benchmark_return,
@@ -891,7 +926,9 @@ const SimulationRunnerContent = () => {
                 <button
                   type="button"
                   onClick={() => changeSide('short')}
-                  disabled={isLoading}
+                  // Book strategies are long-only; the backend refuses side='short'.
+                  disabled={isLoading || simulationParams?.bookWeekday != null}
+                  title={simulationParams?.bookWeekday != null ? 'Book strategies are long-only' : undefined}
                   className={`flex items-center gap-1 px-3 py-1.5 text-sm font-medium transition-colors ${
                     simulationParams?.side === 'short'
                       ? 'bg-red-600 text-white'
@@ -954,7 +991,11 @@ const SimulationRunnerContent = () => {
                     <div className="font-medium">
                       {simulationParams?.rebalanceFreq === 'monthly' ? 'Monthly' : 
                        simulationParams?.rebalanceFreq === 'weekly' ? 'Weekly' : 'Dynamic'}
+                      {simulationParams?.bookWeekday != null && ` · ${WEEKDAY_NAMES[simulationParams.bookWeekday] ?? simulationParams.bookWeekday}`}
                     </div>
+                    {simulationParams?.bookWeekday != null ? (
+                      <div className="text-gray-600 mt-1">Holdings &amp; allocation defined by the book</div>
+                    ) : (<>
                     <div className="text-gray-600 mt-1">
                       {simulationParams?.rebalanceType === 'equal_weight' ? 'Equal Weight' : 'Skewed Allocation'}
                     </div>
@@ -963,6 +1004,7 @@ const SimulationRunnerContent = () => {
                         ? 'All eligible stocks'
                         : `Max ${simulationParams?.maxHoldings} holdings`}
                     </div>
+                    </>)}
                     {simulationParams && simulationParams.primaryFilterTake !== 'none' && (
                       <div className="text-gray-500 text-xs mt-1">
                         Primary: {simulationParams.primaryFilterMetric === 'ath' ? 'ATH' : 'ATL'}
@@ -1176,6 +1218,52 @@ const SimulationRunnerContent = () => {
               );
             })()}
 
+            {/* Book run info — only for book strategy runs (fund desk engine) */}
+            {simulationResult?.book && (() => {
+              const bk = simulationResult.book!;
+              const params = Object.entries(bk.params ?? {});
+              const reasons = Object.entries(bk.order_reasons ?? {});
+              const ignored = bk.ignored_settings ?? [];
+              return (
+                <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="font-semibold uppercase tracking-wide text-emerald-700">Book strategy</span>
+                    <span className="text-emerald-700">engine = fund desk {bk.engine_version ?? '—'}</span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1">
+                    <div>
+                      <span className="text-emerald-700">Kind:</span> <span className="font-medium">{bk.kind}</span>
+                      {params.length > 0 && (
+                        <span className="ml-1">({params.map(([k, v]) => `${k}=${String(v)}`).join(', ')})</span>
+                      )}
+                    </div>
+                    <div>
+                      <span className="text-emerald-700">Weekday:</span>{' '}
+                      <span className="font-medium">
+                        {bk.weekday != null ? (WEEKDAY_NAMES[bk.weekday] ?? bk.weekday) : '—'}
+                      </span>
+                    </div>
+                    {bk.execution && (
+                      <div className="md:col-span-2">
+                        <span className="text-emerald-700">Execution:</span> {bk.execution}
+                      </div>
+                    )}
+                    {reasons.length > 0 && (
+                      <div className="md:col-span-2">
+                        <span className="text-emerald-700">Orders by reason:</span>{' '}
+                        {reasons.map(([r, n]) => `${r} ${n}`).join(' · ')}
+                      </div>
+                    )}
+                    {ignored.length > 0 && (
+                      <div className="md:col-span-2 text-amber-700">
+                        ⚠ Ignored (defined by the book): {ignored.join(', ')}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Current Date and Performance */}
             <div className="mt-6 pt-6 border-t border-gray-200">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -1366,7 +1454,7 @@ const SimulationRunnerContent = () => {
                         </div>
                       </div>
                       <div className="text-xs text-red-600 mt-1">
-                        Removed from portfolio
+                        {exitedStock.exitReason ? `Exit: ${exitedStock.exitReason}` : 'Removed from portfolio'}
                       </div>
                     </div>
                   ))
