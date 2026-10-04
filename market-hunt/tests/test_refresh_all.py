@@ -24,7 +24,7 @@ class TestPickStages:
         assert pick_stages("recon,prices", None) == ["recon", "prices"]
 
     def test_skip_removes(self):
-        assert pick_stages(None, "urls,indicators") == ["mappings", "prices", "recon", "report"]
+        assert pick_stages(None, "urls,indicators") == ["calendar", "mappings", "prices", "recon", "report"]
 
     def test_unknown_stage_rejected(self):
         with pytest.raises(SystemExit):
@@ -40,6 +40,10 @@ class TestMostRecentTradingDay:
 
     def test_sunday_rolls_to_friday(self):
         assert most_recent_trading_day(dt.date(2026, 7, 5)) == dt.date(2026, 7, 3)
+
+    def test_holiday_rolls_back_past_it(self):
+        # Sun 2026-10-04 after Gandhi Jayanti (Fri 10-02): the last session was Thu 10-01
+        assert most_recent_trading_day(dt.date(2026, 10, 4), {dt.date(2026, 10, 2)}) == dt.date(2026, 10, 1)
 
 
 PR_HTML = """

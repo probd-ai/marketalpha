@@ -53,7 +53,7 @@ TRACKED_RECON = {
     "NIFTYSMALLCAP250": "NIFTYSMALLCAP250", "NIFTYMICROCAP250": "NIFTYMICROCAP250",
 }
 
-STAGES = ["urls", "mappings", "prices", "recon", "indicators", "report"]
+STAGES = ["calendar", "urls", "mappings", "prices", "recon", "indicators", "report"]
 
 # Corporate actions: the NSE feed is the primary detector, the price-jump scan is the
 # backstop for what it misses (unauthenticated endpoint, short window, 403s under load).
@@ -77,12 +77,10 @@ def pick_stages(only: str | None, skip: str | None) -> list[str]:
     return [s for s in chosen if s not in skipped]
 
 
-def most_recent_trading_day(today: dt.date) -> dt.date:
-    """Weekday heuristic (no holiday calendar): Sat/Sun roll back to Friday."""
-    d = today
-    while d.weekday() >= 5:
-        d -= dt.timedelta(days=1)
-    return d
+def most_recent_trading_day(today: dt.date, holidays=()) -> dt.date:
+    """Latest NSE session on or before `today`: weekends and the stored exchange holidays roll back."""
+    from market_calendar import last_session
+    return last_session(today, holidays)
 
 
 def parse_pr_page(html: str) -> list[tuple[dt.date, str, str]]:
@@ -232,6 +230,26 @@ def backend_up() -> bool:
 
 
 # --------------------------------------------------------------------------- stages
+def stage_calendar() -> dict:
+    """NSE trading holidays (holiday-master, equity segment) -> Mongo market_holidays. The report's expected date and
+    the fund desk's fill session both depend on it; a failed fetch keeps the previously stored calendar."""
+    from pymongo import MongoClient
+
+    import market_calendar as mc
+    db = MongoClient(MONGO_URI)[DB_NAME]
+    try:
+        rows = mc.parse_holidays(asyncio.run(mc.fetch_holiday_master()))
+    except Exception as e:  # network / NSE format change: report it, keep what is stored
+        years = sorted(mc.years_covered(db))
+        log(f"[calendar] fetch failed ({e!r}); stored calendar covers {years or 'nothing'}")
+        return {"ok": dt.date.today().year in years, "error": repr(e), "years": years}
+    n = mc.store_holidays(db, rows)
+    years = sorted(mc.years_covered(db))
+    upcoming = [f"{r['date']} {r['description']}" for r in rows if r["date"] >= dt.date.today()][:3]
+    log(f"[calendar] stored {n} NSE trading holidays; years {years}; next: {upcoming}")
+    return {"ok": dt.date.today().year in years, "stored": n, "years": years, "upcoming": upcoming}
+
+
 def stage_urls() -> dict:
     if not backend_up():
         return {"ok": False, "error": f"backend not reachable at {BACKEND} — start it: "
@@ -456,8 +474,9 @@ def stage_indicators() -> dict:
 
 def stage_report(stale_tolerance: int) -> dict:
     from pymongo import MongoClient
+    from market_calendar import load_holidays
     db = MongoClient(MONGO_URI)[DB_NAME]
-    expected = most_recent_trading_day(dt.date.today())
+    expected = most_recent_trading_day(dt.date.today(), load_holidays(db))
     out = {}
     for name, coll, match in [("prices", "prices_2025_2029", {}),
                               ("indicators", "indicators", {"indicator_type": "truevx"})]:
@@ -506,7 +525,9 @@ def main() -> int:
     for stage in stages:
         log(f"\n===== stage: {stage} =====")
         try:
-            if stage == "urls":
+            if stage == "calendar":
+                results[stage] = stage_calendar()
+            elif stage == "urls":
                 results[stage] = stage_urls()
             elif stage == "mappings":
                 results[stage] = stage_mappings()
