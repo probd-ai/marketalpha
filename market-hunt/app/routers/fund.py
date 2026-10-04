@@ -8,7 +8,8 @@ Access control (security review 2026-09-27):
   * inputs are type- and range-checked; sleeve universes and ETF symbols must exist in the database.
 
 Model symbols, quantities and prices come only from the engine — no endpoint accepts them. Execution records accept
-the manager's actual fill quantity and price for a line of a published ticket.
+the manager's actual fill quantity and price for a line of a published ticket; a price outside the traded range
+needs an explicit confirm. The other-holdings register accepts only symbols known to the market database.
 """
 import csv
 import hmac as _hmac
@@ -26,8 +27,9 @@ from pydantic import BaseModel
 import settings
 from app.db import mongo_conn
 from app.serialization import sanitize_for_json
-from fund import service
+from fund import papers, service
 from fund.config import validate
+from fund.data import latest_closes, traded_range
 from fund.store import FundStore
 
 logger = logging.getLogger(__name__)
@@ -239,17 +241,22 @@ def ticket_csv(lines: list[dict]) -> str:
 
 class ExecutionIn(BaseModel):
     line_id: str
-    status: str
+    status: str                        # done | partial | extra | skipped
     qty: int | None = None
     price: float | None = None
     note: str | None = None
 
 
 @router.post("/runs/{run_id}/executions")
-def executions(run_id: str, items: list[ExecutionIn]):
+def executions(run_id: str, items: list[ExecutionIn], confirm: bool = False):
+    """409 with {"warnings": [...]} when a fill price needs review; resend with ?confirm=true to save as entered."""
+    st = _store()
     try:
-        return _ok(service.record_executions(_store(), run_id,
-                                             [{k: v for k, v in i.model_dump().items() if v is not None} for i in items]))
+        return _ok(service.record_executions(
+            st, run_id, [{k: v for k, v in i.model_dump().items() if v is not None} for i in items],
+            price_range=lambda syms, since: traded_range(st.db, syms, since), confirm=confirm))
+    except service.PriceWarnings as e:
+        raise HTTPException(status_code=409, detail={"message": "fill prices need review", "warnings": e.warnings})
     except service.RunRefused as e:
         _refused(e)
 
@@ -313,9 +320,66 @@ def books():
 
 @router.get("/actual")
 def actual():
-    return _ok(service.actual_book(_store()))
+    st = _store()
+    return _ok(service.actual_book(st, price_of=lambda syms: latest_closes(st.db, syms)))
+
+
+class OtherHoldingIn(BaseModel):
+    qty: int
+    cost_basis: float | None = None
+    note: str | None = None
+
+
+@router.get("/other-holdings")
+def other_holdings():
+    """Everything held outside the books — manual entries plus extra-fill surplus — for the desk and AI review."""
+    st = _store()
+    return _ok(service.other_holdings_view(st, price_of=lambda syms: latest_closes(st.db, syms)))
+
+
+@router.put("/other-holdings")
+def put_other_holdings(body: dict[str, OtherHoldingIn]):
+    st = _store()
+    known = lambda s: bool(st.db.symbol_mappings.find_one({"symbol": s}) or st.db.index_meta.find_one({"Symbol": s}))
+    try:
+        service.set_other_holdings(st, {k: v.model_dump() for k, v in body.items()}, known)
+        return _ok(service.other_holdings_view(st, price_of=lambda syms: latest_closes(st.db, syms)))
+    except service.RunRefused as e:
+        _refused(e)
 
 
 @router.get("/journal")
 def journal(limit: int = 200):
     return _ok(_store().read_journal(min(max(limit, 1), 1000)))
+
+
+# ---------------------------------------------------------------------------------------------------- AI Broadcast
+@router.get("/papers")
+def list_papers():
+    return _ok(papers.list_papers(_store()))
+
+
+@router.get("/papers/{paper_id}")
+def get_paper(paper_id: str):
+    p = papers.get_paper(_store(), paper_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="paper not found")
+    return _ok(p)
+
+
+@router.post("/papers")
+def publish_paper(body: dict):
+    """Structured paper (spec docs/specs/2026-10-04-ai-broadcast.md); validated strictly, stored as text."""
+    try:
+        return _ok(papers.publish(_store(), body))
+    except papers.PaperRefused as e:
+        _refused(e)
+
+
+@router.post("/papers/{paper_id}/archive")
+def archive_paper(paper_id: str):
+    try:
+        papers.archive(_store(), paper_id)
+        return _ok({"paper_id": paper_id, "status": "ARCHIVED"})
+    except papers.PaperRefused as e:
+        _refused(e)

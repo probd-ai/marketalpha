@@ -22,7 +22,19 @@ export interface FundSummary extends Perf {
 }
 export interface SleeveSummary { id: string; label: string; target_weight: number; weight: number; value: number; cagr: number | null }
 export interface Curve { dates: string[]; fund: number[]; nifty: number[] }
-export interface Execution { line_id: string; status: "done" | "partial" | "skipped"; qty: number; price: number | null; note?: string }
+export type ExecStatus = "done" | "partial" | "extra" | "skipped";
+export interface Execution {
+  line_id: string; status: ExecStatus; qty: number; price: number | null; note?: string; extra_qty?: number;
+  price_warning?: string;
+}
+export interface ExecutionItem { line_id: string; status: ExecStatus; qty?: number; price?: number }
+export interface PriceWarning {
+  line_id: string; symbol: string; price: number; ref_px: number; low: number | null; high: number | null; reason: string;
+}
+export interface OtherRow {
+  symbol: string; qty: number; cost_basis: number | null; note?: string; source?: string; price: number | null; value: number | null;
+}
+export interface OtherHoldings { manual: OtherRow[]; from_tickets: OtherRow[]; value: number }
 export interface Run {
   _id: string; version: number; engine_version: string; status: RunStatus; run_type: string; signal_date: string;
   fill_date: string; iso_week: string; monthly_reset: boolean; initial_build?: boolean;
@@ -47,6 +59,20 @@ export interface FundConfig {
   sleeves: SleeveConfig[]; updated_at?: string;
 }
 export interface ActualRow { sleeve: string; symbol: string; actual_qty: number; model_qty: number; gap_qty: number; gap_value: number | null; price: number | null }
+export interface SleeveTracking { sleeve: string; model_value: number; actual_value: number; under_value: number; over_value: number; unpriced: number }
+export interface Actual {
+  as_of_run: string | null; rows: ActualRow[]; tracking_value: number; sleeves: SleeveTracking[]; undeployed: number;
+  other_value: number;
+}
+export type Cell = string | number | null;
+export interface PaperSection {
+  heading: string; body?: string; note?: { tone: "info" | "warn"; text: string };
+  table?: { columns: string[]; rows: Cell[][]; align?: ("left" | "right")[]; total?: Cell[] };
+}
+export interface Paper {
+  _id: string; title: string; kind: "trade-plan" | "research" | "note"; summary?: string; run_id?: string;
+  author: string; status: "PUBLISHED" | "ARCHIVED"; created_at: string; archived_at?: string; sections?: PaperSection[];
+}
 export interface CashFlow {
   _id: string; amount: number; note: string; status: "PENDING" | "APPLIED" | "CANCELLED"; created_at: string;
   applied_run_id?: string; nav?: number; units?: number;
@@ -54,7 +80,14 @@ export interface CashFlow {
 export interface JournalEntry { at: string; event: string; detail: Record<string, unknown> }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message); }
+  constructor(public status: number, message: string, public detail?: unknown) { super(message); }
+}
+
+/** The fill-price warnings carried by a 409 from the executions endpoint, or null for any other error. */
+export function priceWarnings(e: unknown): PriceWarning[] | null {
+  if (!(e instanceof ApiError) || e.status !== 409) return null;
+  const d = e.detail as { warnings?: PriceWarning[] } | undefined;
+  return Array.isArray(d?.warnings) ? d!.warnings : null;
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -62,8 +95,13 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(path, { ...init, headers: { "Content-Type": "application/json", "X-Fund-Desk": "1", ...(init?.headers ?? {}) } });
   if (!r.ok) {
     let msg = r.statusText;
-    try { const b = await r.json(); msg = typeof b.detail === "string" ? b.detail : JSON.stringify(b.detail ?? b); } catch { /* keep statusText */ }
-    throw new ApiError(r.status, msg);
+    let detail: unknown;
+    try {
+      const b = await r.json();
+      detail = b.detail;
+      msg = typeof b.detail === "string" ? b.detail : typeof b.detail?.message === "string" ? b.detail.message : JSON.stringify(b.detail ?? b);
+    } catch { /* keep statusText */ }
+    throw new ApiError(r.status, msg, detail);
   }
   return r.json() as Promise<T>;
 }
@@ -79,10 +117,17 @@ export const api = {
   publish: (id: string) => req<Run>(`/api/fund/runs/${id}/publish`, { method: "POST" }),
   discard: (id: string) => req<{ status: string }>(`/api/fund/runs/${id}/discard`, { method: "POST" }),
   ackDrift: (runId: string) => req<{ acknowledged: string }>("/api/fund/drift/ack", { method: "POST", body: JSON.stringify({ run_id: runId }) }),
-  record: (id: string, items: Partial<Execution>[]) =>
-    req<{ status: RunStatus; recorded: number; lines: number }>(`/api/fund/runs/${id}/executions`, { method: "POST", body: JSON.stringify(items) }),
+  record: (id: string, items: ExecutionItem[], confirm = false) =>
+    req<{ status: RunStatus; recorded: number; lines: number }>(`/api/fund/runs/${id}/executions${confirm ? "?confirm=true" : ""}`,
+      { method: "POST", body: JSON.stringify(items) }),
   books: () => req<{ run_id: string | null; signal_date?: string; fund?: FundSummary; books: Book[]; curve?: Curve; sleeves?: SleeveSummary[] }>("/api/fund/books"),
-  actual: () => req<{ as_of_run: string | null; rows: ActualRow[]; tracking_value: number }>("/api/fund/actual"),
+  actual: () => req<Actual>("/api/fund/actual"),
+  papers: () => req<Paper[]>("/api/fund/papers"),
+  paper: (id: string) => req<Paper>(`/api/fund/papers/${encodeURIComponent(id)}`),
+  archivePaper: (id: string) => req<{ status: string }>(`/api/fund/papers/${encodeURIComponent(id)}/archive`, { method: "POST" }),
+  otherHoldings: () => req<OtherHoldings>("/api/fund/other-holdings"),
+  saveOtherHoldings: (items: Record<string, { qty: number; cost_basis?: number | null; note?: string | null }>) =>
+    req<OtherHoldings>("/api/fund/other-holdings", { method: "PUT", body: JSON.stringify(items) }),
   journal: () => req<JournalEntry[]>("/api/fund/journal"),
   cashflows: () => req<CashFlow[]>("/api/fund/cashflows"),
   addCashflow: (amount: number, note: string) => req<CashFlow>("/api/fund/cashflows", { method: "POST", body: JSON.stringify({ amount, note }) }),

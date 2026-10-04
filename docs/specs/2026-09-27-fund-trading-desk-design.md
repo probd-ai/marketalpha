@@ -379,3 +379,17 @@ This was an adversarial review of the desk code by the assistant. Human sign-off
     material: a change starts a new model version.
   - Configs saved before this setting keep their original rule (every month, no band).
 - **Applied** as model version 2. The initial-build draft was recomputed.
+
+## 16. Between-run trades reach the ticket (2026-10-04)
+
+- **Bug:** sleeves act on every session for index exits (`tranche.py` step 1, `grid10.py` step 1), but the ticket
+  carried only the run day's orders. ASKAUTOLTD left the Total Market index effective Wed 2026-09-30; the model sold it
+  that day and no ticket ever told the manager. Index reviews rarely take effect on a Monday (since 2025: 3/3 Nifty 50,
+  6/7 Nifty 200, 11/12 Total Market removals were mid-week), so every review was exposed.
+- **Fix:** `compute_run` adds every model order dated after the last published fill and up to S
+  (`ticket.orders_since`) to the ticket, with holdings as of the last ticket (`ticket.held_before_ticket`) so the sale
+  is a full exit. The line reads "Left its index on 30 Sep (model sold it then; sell at the next open)". The engine,
+  replay and checkpoints are unchanged — only the ticket gains the missing lines.
+- **Tests:** `tests/fund_desk/test_missed_orders.py` (unit + a real-data replay of the published 09-25 build).
+- **Also 2026-10-04:** NSE trading-holiday calendar (`market_calendar.py`, refresh stage `calendar`, Mongo
+  `market_holidays`) — the fill session skips exchange holidays; "Market calendar" pre-trade check.

@@ -94,7 +94,8 @@ A stock that leaves its sleeve's index is sold at the next open.
 | **Runs → a run** | Pre-trade checks and the **ticket** — what to sell and buy, by sleeve, sells first, each line with its reason. **Publish** or **Discard**; download CSV. |
 | **Ticket** | The ticket for execution: mark each line **done / partial / skipped** with your fill price, then Save. Print or CSV. |
 | **Books** | Model holdings per sleeve: weight, value, shares, 22-day return, grid state (Value) or tranches / Alpha (Growth, Satellite). |
-| **Tracking** | Your recorded positions vs the model, and the ₹ tracking difference. |
+| **Tracking** | Your recorded positions vs the model, the ₹ tracking difference, and capital not deployed per sleeve. |
+| **Other holdings** | What you hold outside the books (plus the surplus of `extra` fills), valued at the latest close. |
 | **Cash** | **Deposits and withdrawals after go-live.** The next published run spreads a deposit across the sleeves at target weights, or sells a withdrawal pro-rata. |
 | **Journal** | Append-only audit log: every run, publish, execution, cash flow and settings change. |
 | **Settings** | Capital, model start, sleeve weights, fund-rebalance months and band, costs. Material changes start a new **model version**. |

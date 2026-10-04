@@ -25,19 +25,17 @@ import pandas as pd
 
 from . import checks as C
 from .config import validate
-from .data import BENCH, build_asset_market, build_market, charge_rates
+from .data import BENCH, build_asset_market, build_market, charge_rates, market_holidays
 from .engine import ENGINE_VERSION
-from .engine.asset import Asset
-from .engine.calendar import period_start_shifted, trading_days, week_session
+from .engine.calendar import trading_days
 from .engine.costs import Costs
+from .engine.factory import base_schedule, make_book
 from .engine.fund import blend
-from .engine.grid10 import Grid10
 from .engine.projection import next_session, project
 from .engine.replay import replay_sleeve
-from .engine.tranche import Tranche
 from .engine.types import Order, Reason, SleeveState
 from .flows import resize_factors, total_units, validate_flow
-from .ticket import build_ticket
+from .ticket import build_ticket, held_before_ticket, orders_since
 
 
 class RunRefused(Exception):
@@ -45,13 +43,7 @@ class RunRefused(Exception):
 
 
 def _book(sl: dict):
-    p = sl.get("params") or {}
-    if sl["kind"] == "grid10":
-        return Grid10(int(p.get("n", 10)))
-    if sl["kind"] == "tranche":
-        return Tranche(int(p.get("top", 5)), int(p.get("weeks", 8)), int(p.get("slot_div", 40)),
-                       float(p.get("max_w", 0.10)), bool(p.get("deploy_cash", True)))
-    return Asset(sl["symbol"])
+    return make_book(sl["kind"], sl.get("params"), sl.get("symbol"))
 
 
 def _market(db, sl: dict, model_start: date, today: date):
@@ -123,7 +115,8 @@ def compute_run(db, store, today: date | None = None, progress=lambda msg: None)
         markets[sl["id"]] = _market(db, sl, ms, today)
     bench = next(iter(markets.values())).closes[BENCH]
     S = bench.dropna().index[-1]
-    F = next_session(S)
+    holidays = tuple(sorted(market_holidays(db)))
+    F = next_session(S, holidays)              # a holiday is never the fill session (Gandhi Jayanti 2026-10-02)
     week = list(F.isocalendar()[:2])
     if any(list(pd.Timestamp(r["fill_date"]).isocalendar()[:2]) == week for r in published):
         raise RunRefused(f"a run is already published for ISO week {week[0]}-W{week[1]:02d}")
@@ -134,7 +127,7 @@ def compute_run(db, store, today: date | None = None, progress=lambda msg: None)
     def schedule(kind):
         if kind == "asset":
             return set()
-        base = period_start_shifted(cal, "weekly", k) if kind == "grid10" else week_session(cal, k)
+        base = base_schedule(kind, cal, k)
         back = {d for d in base if (first_pub is None or d < first_pub) and not in_f_week(d)}
         return back | set(pub_fill) | {F}
 
@@ -153,7 +146,8 @@ def compute_run(db, store, today: date | None = None, progress=lambda msg: None)
 
     # replay each sleeve through the published checkpoints to S, then one projected step to F
     cps = [pd.Timestamp(r["signal_date"]) for r in published]
-    curves, st_S, st_F, orders_F, mismatches = {}, {}, {}, {}, []
+    curves, st_S, st_F, orders_F, missed, mismatches = {}, {}, {}, {}, {}, []
+    last_fill = pd.Timestamp(published[-1]["fill_date"]) if published else None
     for sl in cfg["sleeves"]:
         sid, m, book = sl["id"], markets[sl["id"]], _book(sl)
         progress(f"replaying {sl['label']}")
@@ -172,6 +166,7 @@ def compute_run(db, store, today: date | None = None, progress=lambda msg: None)
         pieces.append(res.equity)
         curves[sid] = pd.concat(pieces)
         st_S[sid] = copy.deepcopy(res.state)
+        missed[sid] = orders_since(res.orders, last_fill)
         fut = replay_sleeve(book, project(m, S, F), costs, ms, F, scheds[sid], 1.0, resume=(S, res.state))
         st_F[sid], orders_F[sid] = fut.state, fut.orders.get(F, [])
 
@@ -228,8 +223,13 @@ def compute_run(db, store, today: date | None = None, progress=lambda msg: None)
             tsl[sl["label"]] = {"orders": build, "scale": scale[sid], "held_before": {}, "held_after": after,
                                 "reset_factor": None, "ctx": ctx}
             continue
-        tsl[sl["label"]] = {"orders": orders_F[sid], "scale": scale[sid],
-                            "held_before": {s: st_S[sid].qty(s) for s in st_S[sid].lots},
+        # trades the model made between the last published fill and S (index exits happen on any session) were never
+        # on a ticket — carry them onto this one, dated, as full exits of what the manager still holds
+        for d, o in missed[sid]:
+            ctx.setdefault(o.symbol, {})["exit_date"] = d.strftime("%d %b")
+        tsl[sl["label"]] = {"orders": [o for _, o in missed[sid]] + orders_F[sid], "scale": scale[sid],
+                            "held_before": held_before_ticket({s: st_S[sid].qty(s) for s in st_S[sid].lots},
+                                                              missed[sid]),
                             "held_after": after,
                             "reset_factor": resize[sid] if resize else None, "resize_reasons": resize_reasons,
                             "ctx": ctx}
@@ -239,7 +239,8 @@ def compute_run(db, store, today: date | None = None, progress=lambda msg: None)
     # checks
     ck = []
     ind_days = [m.indicator_last.max() for m in markets.values() if m.indicator_last is not None]
-    ck.append(C.freshness(S.date(), today, min(ind_days).date() if ind_days else None))
+    ck.append(C.freshness(S.date(), today, min(ind_days).date() if ind_days else None, holidays))
+    ck.append(C.calendar(F.date(), {h.year for h in holidays}))
     for sl in cfg["sleeves"]:
         sid, m = sl["id"], markets[sl["id"]]
         if sl["kind"] == "asset":
@@ -369,13 +370,73 @@ def _publish(db, store, run_id: str) -> dict:
     return store.get_run(run_id)
 
 
-PRICE_SANITY = 0.20      # a recorded fill more than 20% away from the ticket's reference price is treated as a typo
+PRICE_SANITY = 0.20      # a fill more than 20% from the ticket's reference price is worth a second look
 
 
-def record_executions(store, run_id: str, items: list[dict]) -> dict:
-    """Record what the manager actually did per ticket line. `done` always means the full ticket quantity; `partial`
-    needs a quantity strictly between 0 and the ticket quantity; every fill needs a finite price within ±20% of the
-    reference. Validates the whole request before writing anything."""
+class PriceWarnings(RunRefused):
+    """Fill prices that need the manager's review (not this week's traded range, or far from the reference). The
+    request is refused without writing anything; resubmitting with confirm=True saves it as entered."""
+
+    def __init__(self, warnings: list[dict]):
+        self.warnings = warnings
+        super().__init__("; ".join(f"{w['line_id']} {w['symbol']}: {w['reason']}" for w in warnings))
+
+
+def _whole(label: str, name: str, v) -> int:
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        raise RunRefused(f"{label}: {name} must be a whole number of shares, 0 or more")
+    return v
+
+
+def _positive_price(label: str, name: str, v) -> float | None:
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+        raise RunRefused(f"{label}: {name} must be a positive price")
+    return float(v)
+
+
+def _fill(lid: str, l: dict, it: dict) -> dict:
+    """done = full ticket quantity · partial = strictly between 0 and it · extra = more than it (BUY only; the fund
+    counts the ticket quantity, the surplus is an other holding) · skipped."""
+    status = it.get("status")
+    if status not in ("done", "partial", "extra", "skipped"):
+        raise RunRefused(f"{lid}: status must be done, partial, extra or skipped")
+    if status == "skipped":
+        return {"status": status, "qty": 0, "price": None}
+    price = it.get("price")
+    if isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
+        raise RunRefused(f"{lid}: a fill price is required")
+    price, ticket_qty, q = float(price), int(l["qty"]), it.get("qty")
+    if status == "done":
+        return {"status": status, "qty": ticket_qty, "price": price}
+    if status == "partial":
+        if isinstance(q, bool) or not isinstance(q, int) or not 0 < q < ticket_qty:
+            raise RunRefused(f"{lid}: a partial fill must be between 1 and {ticket_qty - 1} shares")
+        return {"status": status, "qty": q, "price": price}
+    if l["side"] != "BUY":
+        raise RunRefused(f"{lid}: extra applies to BUY lines only")
+    if isinstance(q, bool) or not isinstance(q, int) or q <= ticket_qty:
+        raise RunRefused(f"{lid}: an extra fill must be more than the ticket's {ticket_qty} shares")
+    return {"status": status, "qty": q, "price": price, "extra_qty": q - ticket_qty}
+
+
+def _price_warning(l: dict, price: float, rng) -> str | None:
+    reasons = []
+    if rng and not rng[0] <= price <= rng[1]:
+        reasons.append(f"not traded at this price since the fill date (low {rng[0]:.2f}, high {rng[1]:.2f}) — "
+                       f"an older holding's cost or a later buy?")
+    if abs(price / l["ref_px"] - 1) > PRICE_SANITY:
+        reasons.append(f"more than 20% from the reference {l['ref_px']:.2f} — check for a typo")
+    return "; ".join(reasons) or None
+
+
+def record_executions(store, run_id: str, items: list[dict], price_range=None, confirm: bool = False) -> dict:
+    """Record what the manager actually did per ticket line (statuses: see `_fill`).
+
+    `price_range(symbols, since_iso) -> {symbol: (low, high)}` is the traded range from the fill date to the latest
+    bar. A price outside it, or more than 20% from the reference, raises PriceWarnings unless `confirm`; confirmed
+    records keep the warning text as `price_warning`. Validates the whole request before writing anything."""
     with _write_lock:
         run = store.get_run(run_id)
         if not run:
@@ -392,35 +453,51 @@ def record_executions(store, run_id: str, items: list[dict]) -> dict:
             if lid in seen:
                 raise RunRefused(f"{lid} appears more than once in this request")
             seen.add(lid)
-            status = it.get("status")
-            if status not in ("done", "partial", "skipped"):
-                raise RunRefused(f"{lid}: status must be done, partial or skipped")
-            qty, price = 0, None
-            if status != "skipped":
-                price = it.get("price")
-                if isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
-                    raise RunRefused(f"{lid}: a fill price is required")
-                price = float(price)
-                if abs(price / l["ref_px"] - 1) > PRICE_SANITY:
-                    raise RunRefused(f"{lid}: fill price {price:.2f} is more than 20% away from the reference "
-                                     f"{l['ref_px']:.2f} — check for a typo")
-                if status == "done":
-                    qty = int(l["qty"])
-                else:
-                    q = it.get("qty")
-                    if isinstance(q, bool) or not isinstance(q, int) or not 0 < q < l["qty"]:
-                        raise RunRefused(f"{lid}: a partial fill must be between 1 and {l['qty'] - 1} shares")
-                    qty = q
-            recs.append({"line_id": lid, "sleeve": l["sleeve"], "symbol": l["symbol"], "side": l["side"],
-                         "status": status, "qty": qty, "price": price, "note": str(it.get("note", ""))[:200]})
-        for r in recs:
+            recs.append((l, {"line_id": lid, "sleeve": l["sleeve"], "symbol": l["symbol"], "side": l["side"],
+                             **_fill(lid, l, it), "note": str(it.get("note", ""))[:200]}))
+        priced = [r["symbol"] for _, r in recs if r["price"] is not None]
+        ranges = price_range(priced, run.get("fill_date")) if price_range and priced else {}
+        warnings = []
+        for l, r in recs:
+            w = _price_warning(l, r["price"], ranges.get(r["symbol"])) if r["price"] is not None else None
+            if w:
+                rng = ranges.get(r["symbol"]) or (None, None)
+                warnings.append({"line_id": r["line_id"], "symbol": r["symbol"], "price": r["price"],
+                                 "ref_px": l["ref_px"], "low": rng[0], "high": rng[1], "reason": w})
+                r["price_warning"] = w
+        if warnings and not confirm:
+            raise PriceWarnings(warnings)
+        for _, r in recs:
             store.record_execution(run_id, r)
         done = {e["line_id"] for e in store.executions(run_id)}
         status = "CLOSED" if done >= set(lines) else "EXECUTING"
         store.set_status(run_id, status)
-        store.journal("EXECUTIONS_RECORDED", {"run_id": run_id, "lines": [r["line_id"] for r in recs],
-                                              "run_status": status})
+        store.journal("EXECUTIONS_RECORDED", {"run_id": run_id, "lines": [r["line_id"] for _, r in recs],
+                                              "run_status": status,
+                                              "confirmed_warnings": [w["line_id"] for w in warnings]})
         return {"run_id": run_id, "status": status, "recorded": len(done), "lines": len(lines)}
+
+
+def set_other_holdings(store, items: dict, known) -> list[dict]:
+    """Replace the other (outside-the-books) holding of each given symbol: {SYMBOL: {qty, cost_basis?, note?}};
+    qty 0 removes it. `known(symbol)` must confirm the symbol exists in the market database. Validates everything
+    before writing."""
+    with _write_lock:
+        clean = {}
+        for sym, o in items.items():
+            sym = str(sym).strip().upper()
+            if not known(sym):
+                raise RunRefused(f"unknown symbol {sym}")
+            o = o or {}
+            q = _whole(sym, "qty", o.get("qty"))
+            cost = _positive_price(sym, "cost_basis", o.get("cost_basis"))
+            note = str(o["note"]).strip()[:200] if o.get("note") else None
+            clean[sym] = None if q == 0 else {k: v for k, v in (("qty", q), ("cost_basis", cost), ("note", note))
+                                              if v is not None}
+        for sym, doc in clean.items():
+            store.set_other_holding(sym, doc)
+            store.journal("OTHER_HOLDING_UPDATED", {"symbol": sym, **(doc or {"qty": 0})})
+        return store.other_holdings()
 
 
 def add_cashflow(store, amount, note: str = "") -> dict:
@@ -448,33 +525,79 @@ def cancel_cashflow(store, flow_id: str) -> None:
         store.journal("CASHFLOW_CANCELLED", {"id": flow_id})
 
 
-def actual_book(store) -> dict:
-    """Positions implied by execution records, compared with the latest run's model book (in whole shares)."""
+def _fund_qty(e: dict) -> int:
+    """Shares an execution put into (or took out of) the fund; an `extra` surplus is an other holding."""
+    return e["qty"] - int(e.get("extra_qty") or 0)
+
+
+def _published_executions(store) -> list[dict]:
     cfg = store.get_config()
-    runs = store.published_runs(cfg["version"])
-    ids = {r["_id"] for r in runs}
+    ids = {r["_id"] for r in store.published_runs(cfg["version"])}
+    return [e for e in store.executions() if e["run_id"] in ids and e["status"] != "skipped" and e.get("qty")]
+
+
+def other_holdings_view(store, price_of=None) -> dict:
+    """Everything held outside the books: manual entries plus the surplus of `extra` fills on published tickets,
+    valued at the latest close where known."""
+    manual = store.other_holdings()
+    extras = [e for e in _published_executions(store) if e.get("extra_qty")]
+    syms = sorted({o["symbol"] for o in manual} | {e["symbol"] for e in extras})
+    closes = price_of(syms) if price_of and syms else {}
+
+    def valued(row: dict) -> dict:
+        px = closes.get(row["symbol"])
+        return {**row, "price": px, "value": row["qty"] * px if px else None}
+
+    rows_manual = [valued({"symbol": o["symbol"], "qty": o["qty"], "cost_basis": o.get("cost_basis"),
+                           **({"note": o["note"]} if o.get("note") else {})}) for o in manual]
+    rows_tickets = [valued({"symbol": e["symbol"], "qty": int(e["extra_qty"]), "cost_basis": e["price"],
+                            "source": f"{e['run_id']} {e['line_id']}"})
+                    for e in sorted(extras, key=lambda e: (e["symbol"], e["run_id"]))]
+    return {"manual": rows_manual, "from_tickets": rows_tickets,
+            "value": sum(r["value"] for r in rows_manual + rows_tickets if r["value"] is not None)}
+
+
+def actual_book(store, price_of=None) -> dict:
+    """Positions implied by execution records, compared with the latest run's model book (in whole shares).
+
+    Valued at the latest close from `price_of(symbols) -> {symbol: close}` where available, else the model book's
+    price. Adds a per-sleeve summary (model / actual / under-invested / over-invested rupees), the capital not
+    deployed (sum of under-invested — the next ticket does not buy it back on its own) and the value of other
+    holdings (outside the books), which are never counted as gaps."""
+    cfg = store.get_config()
     pos: dict[tuple, dict] = {}
-    for e in store.executions():
-        if e["run_id"] not in ids or e["status"] == "skipped" or not e.get("qty"):
-            continue
+    for e in _published_executions(store):
         k = (e["sleeve"], e["symbol"])
-        p = pos.setdefault(k, {"sleeve": e["sleeve"], "symbol": e["symbol"], "qty": 0, "cost": 0.0})
-        sign = 1 if e["side"] == "BUY" else -1
-        p["qty"] += sign * e["qty"]
-        p["cost"] += sign * e["qty"] * e["price"]
-    latest = store.db.fund_runs.find_one({"version": cfg["version"]}, sort=[("created_at", -1)])
+        p = pos.setdefault(k, {"qty": 0})
+        p["qty"] += (1 if e["side"] == "BUY" else -1) * _fund_qty(e)
+    latest = store.latest_run(cfg["version"])
     model = {}
     if latest:
         for b in latest["books"]:
             for h in b["holdings"]:
                 model[(b["label"], h["symbol"])] = {"shares": h["shares"], "price": h["price"]}
-    rows = []
-    for k in sorted(set(pos) | set(model)):
-        a = pos.get(k, {"qty": 0, "cost": 0.0})
+    keys = sorted(set(pos) | set(model))
+    closes = price_of(sorted({k[1] for k in keys})) if price_of and keys else {}
+    rows, sleeves = [], {}
+    for k in keys:
+        a = pos.get(k, {"qty": 0})
         mdl = model.get(k, {"shares": 0.0, "price": None})
-        px = mdl["price"]
-        rows.append({"sleeve": k[0], "symbol": k[1], "actual_qty": a["qty"], "model_qty": round(mdl["shares"]),
-                     "gap_qty": a["qty"] - round(mdl["shares"]),
-                     "gap_value": (a["qty"] - round(mdl["shares"])) * px if px else None, "price": px})
+        px = closes.get(k[1]) or mdl["price"]
+        m_qty = round(mdl["shares"])
+        gap = a["qty"] - m_qty
+        rows.append({"sleeve": k[0], "symbol": k[1], "actual_qty": a["qty"], "model_qty": m_qty,
+                     "gap_qty": gap, "gap_value": gap * px if px else None, "price": px})
+        s = sleeves.setdefault(k[0], {"sleeve": k[0], "model_value": 0.0, "actual_value": 0.0,
+                                      "under_value": 0.0, "over_value": 0.0, "unpriced": 0})
+        if not px:
+            s["unpriced"] += 1
+            continue
+        s["model_value"] += m_qty * px
+        s["actual_value"] += a["qty"] * px
+        s["under_value"] += max(-gap, 0) * px
+        s["over_value"] += max(gap, 0) * px
+    sl = sorted(sleeves.values(), key=lambda s: s["sleeve"])
     return {"as_of_run": latest["_id"] if latest else None, "rows": rows,
-            "tracking_value": sum(abs(r["gap_value"]) for r in rows if r["gap_value"] is not None)}
+            "tracking_value": sum(abs(r["gap_value"]) for r in rows if r["gap_value"] is not None),
+            "sleeves": sl, "undeployed": sum(s["under_value"] for s in sl),
+            "other_value": other_holdings_view(store, price_of)["value"]}

@@ -1,5 +1,6 @@
 from datetime import date
 
+import pandas as pd
 import pytest
 
 from fund import checks
@@ -29,6 +30,24 @@ def test_reset_nets_with_weekly_orders_and_tiny_nets_are_residual():
     lines, res = build_ticket({"Growth": sl}, {"AAA": 100.0, "CCC": 10.0})
     # AAA: +0.5 weekly, then -10% of 10.5 = -1.05 -> net -0.55 -> floor 0 -> residual ; CCC tiny -> residual
     assert lines == [] and {r["symbol"] for r in res} == {"AAA", "CCC"}
+
+
+def test_freshness_knows_market_holidays():
+    gandhi = {date(2026, 10, 2)}
+    # Thu 10-01 is the last session before Mon 10-05 when Fri 10-02 is a holiday
+    assert checks.freshness(date(2026, 10, 1), date(2026, 10, 5), date(2026, 10, 1), gandhi).status == "PASS"
+    assert checks.freshness(date(2026, 10, 1), date(2026, 10, 5), date(2026, 10, 1)).status == "WARN"   # no calendar
+
+
+def test_calendar_check_warns_without_holidays_for_the_fill_year():
+    assert checks.calendar(date(2026, 10, 5), {2026}).status == "PASS"
+    c = checks.calendar(date(2027, 1, 4), {2026})
+    assert c.status == "WARN" and "2027" in c.detail
+
+
+def test_fill_session_skips_a_holiday():
+    from fund.engine.projection import next_session
+    assert next_session(pd.Timestamp("2026-10-01"), (date(2026, 10, 2),)) == pd.Timestamp("2026-10-05")
 
 
 def test_check_verdicts():

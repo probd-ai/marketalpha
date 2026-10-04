@@ -53,6 +53,45 @@ def load_prices(db, symbols: list[str], since: datetime, want_value: bool = Fals
     return opens, closes
 
 
+def market_holidays(db) -> set:
+    """NSE equity trading holidays stored by the refresh's calendar stage (empty if never loaded)."""
+    from market_calendar import load_holidays
+    return load_holidays(db)
+
+
+def latest_closes(db, symbols: list[str]) -> dict[str, float]:
+    """Most recent close per symbol (newest year collection first; a symbol absent everywhere is left out)."""
+    out: dict[str, float] = {}
+    cols = sorted((c for c in db.list_collection_names() if c.startswith("prices_")), key=_last_year, reverse=True)
+    for c in cols:
+        todo = [s for s in symbols if s not in out]
+        if not todo:
+            break
+        for d in db[c].aggregate([{"$match": {"symbol": {"$in": todo}}}, {"$sort": {"date": -1}},
+                                  {"$group": {"_id": "$symbol", "close": {"$first": "$close_price"}}}]):
+            if d["close"]:
+                out[d["_id"]] = float(d["close"])
+    return out
+
+
+def traded_range(db, symbols: list[str], since_iso: str | None) -> dict[str, tuple[float, float]]:
+    """(lowest low, highest high) per symbol from `since_iso` (a fill date) to the latest bar; symbols without bars
+    in that window are left out."""
+    if not since_iso or not symbols:
+        return {}
+    since = datetime.fromisoformat(str(since_iso)[:10])
+    lo: dict[str, float] = {}
+    hi: dict[str, float] = {}
+    for c in (c for c in db.list_collection_names() if c.startswith("prices_") and _last_year(c) >= since.year):
+        for d in db[c].aggregate([{"$match": {"symbol": {"$in": symbols}, "date": {"$gte": since}}},
+                                  {"$group": {"_id": "$symbol", "lo": {"$min": "$low_price"},
+                                              "hi": {"$max": "$high_price"}}}]):
+            if d["lo"] and d["hi"]:
+                lo[d["_id"]] = min(lo.get(d["_id"], d["lo"]), d["lo"])
+                hi[d["_id"]] = max(hi.get(d["_id"], d["hi"]), d["hi"])
+    return {s: (float(lo[s]), float(hi[s])) for s in lo}
+
+
 def load_truevx(db, symbols: list[str], since: datetime, fields=TRUEVX_FIELDS) -> dict[str, pd.DataFrame]:
     proj = {"_id": 0, "symbol": 1, "date": 1, **{f"data.{f}": 1 for f in fields}}
     docs = db.indicators.find({"symbol": {"$in": symbols}, "indicator_type": "truevx", "base_symbol": BENCH,

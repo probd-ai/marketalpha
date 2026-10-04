@@ -21,7 +21,7 @@ REASON_TEXT = {
     Reason.TRANCHE_EXPIRED: "Tranche reached its 8-week clock",
     Reason.TRIM_ABOVE_CAP: "Holding above the 10% cap — trimmed back",
     Reason.CASH_DEPLOY: "Leftover cash deployed up to the 10% cap",
-    Reason.INDEX_EXIT: "Left its index — forced sale",
+    Reason.INDEX_EXIT: "Left its index{exit_note} — forced sale",
     Reason.MONTHLY_RESET: "Fund rebalance — sleeves restored to their target weights",
     Reason.INITIAL_BUILD: "Initial build — model holding bought to start the fund",
     Reason.DEPOSIT: "New money added — spread across the sleeve at its target weight",
@@ -54,10 +54,29 @@ def reason_text(reasons: list, ctx: dict) -> str:
     for r in reasons:
         t = REASON_TEXT.get(r, str(r))
         try:
-            out.append(t.format(**{"roc22": float("nan"), **ctx}))
+            note = f" on {ctx['exit_date']} (model sold it then; sell at the next open)" if ctx.get("exit_date") else ""
+            out.append(t.format(**{"roc22": float("nan"), "exit_note": note, **ctx}))
         except (KeyError, ValueError):
             out.append(t.split(" (")[0])
     return " · ".join(dict.fromkeys(out))
+
+
+def orders_since(orders_by_day: dict, after) -> list[tuple]:
+    """(session, Order) for every model order on a session strictly after `after` (the last published fill day),
+    oldest first. Between run days the engine still acts — index exits happen on whatever session the stock leaves —
+    and those trades must reach the next ticket. None (nothing published yet) -> []."""
+    if after is None:
+        return []
+    return [(d, o) for d in sorted(orders_by_day) if d > after for o in orders_by_day[d]]
+
+
+def held_before_ticket(held_now: dict, missed: list[tuple]) -> dict:
+    """Model holdings as of the last ticket: today's holdings with the in-between trades undone. A stock the model
+    already sold mid-week is still in the manager's book, so the ticket must treat its sale as a full exit."""
+    out = dict(held_now)
+    for _, o in missed:
+        out[o.symbol] = out.get(o.symbol, 0.0) + (o.qty if o.side == "SELL" else -o.qty)
+    return {s: q for s, q in out.items() if q > 1e-12}
 
 
 def build_ticket(sleeves: dict, ref_px: dict, band: float = 0.003) -> tuple[list[TicketLine], list[dict]]:

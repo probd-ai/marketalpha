@@ -21,7 +21,8 @@ const TONE: Record<string, string> = {
   DRAFT: "bg-accent-soft text-accent", PUBLISHED: "bg-good-soft text-good", EXECUTING: "bg-warn-soft text-warn",
   CLOSED: "bg-panel-2 text-ink-2 border border-line", DISCARDED: "bg-panel-2 text-muted border border-line",
   BUY: "bg-accent-soft text-buy", SELL: "bg-bad-soft text-sell", done: "bg-good-soft text-good",
-  partial: "bg-warn-soft text-warn", skipped: "bg-panel-2 text-muted border border-line",
+  partial: "bg-warn-soft text-warn", extra: "bg-accent-soft text-accent",
+  "trade-plan": "bg-accent-soft text-accent", research: "bg-good-soft text-good", skipped: "bg-panel-2 text-muted border border-line",
 };
 const ICON: Record<string, string> = { PASS: "✓", WARN: "!", BLOCK: "✕" };
 

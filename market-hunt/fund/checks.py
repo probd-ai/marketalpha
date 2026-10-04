@@ -21,23 +21,34 @@ class Check:
         return asdict(self)
 
 
-def last_weekday_before(today: date) -> date:
-    return pd.Timestamp(np.busday_offset(today, -1, roll="backward")).date()
+def last_weekday_before(today: date, holidays=()) -> date:
+    """Last trading session strictly before `today` (weekends and the given exchange holidays skipped)."""
+    return pd.Timestamp(np.busday_offset(today, -1, roll="backward", holidays=list(holidays))).date()
 
 
-def freshness(signal_day: date, today: date, indicator_day: date | None) -> Check:
-    expected = last_weekday_before(today)
+def freshness(signal_day: date, today: date, indicator_day: date | None, holidays=()) -> Check:
+    expected = last_weekday_before(today, holidays)
     issues = []
     if signal_day < expected:
-        issues.append(f"latest prices are for {signal_day}, expected {expected} (or a market holiday)")
+        issues.append(f"latest prices are for {signal_day}, expected {expected}"
+                      + ("" if holidays else " (or a market holiday)"))
     if indicator_day is not None and indicator_day < signal_day:
         issues.append(f"indicators end {indicator_day}, prices end {signal_day}")
     if not issues:
         return Check("Data freshness", PASS, f"prices and indicators current to {signal_day}")
-    stale_days = int(np.busday_count(signal_day, expected))
+    stale_days = int(np.busday_count(signal_day, expected, holidays=list(holidays)))
     status = WARN if stale_days <= 1 and (indicator_day is None or indicator_day >= signal_day) else BLOCK
     return Check("Data freshness", status, "; ".join(issues) + (" — refresh data before trading" if status == BLOCK else
                                                                " — may be a market holiday"))
+
+
+def calendar(fill_day: date, years_covered: set[int]) -> Check:
+    """The fill session is projected with the NSE holiday calendar; without that year's calendar every weekday is
+    assumed to trade, so a holiday could be chosen as the fill day."""
+    if fill_day.year in years_covered:
+        return Check("Market calendar", PASS, f"NSE holidays loaded for {fill_day.year}; fill session {fill_day}")
+    return Check("Market calendar", WARN, f"no NSE holiday calendar for {fill_day.year} — fill session {fill_day} "
+                                          f"assumes every weekday trades; run the market refresh (calendar stage)")
 
 
 def coverage(sleeve: str, members: list[str], missing_price: list[str], missing_ind: list[str]) -> Check:

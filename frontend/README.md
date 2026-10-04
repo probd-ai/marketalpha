@@ -30,8 +30,14 @@ npm start                # http://localhost:3300
 3. **Run review.** Check the pre-trade checks. A `BLOCK` prevents publishing; a `WARN` is information. Then read the ticket.
 4. **Publish.** This freezes the ticket as the week's trades.
 5. **Trade at or after the next open.** Sells first, then buys, using the limit guidance.
-6. **Ticket page → record executions:** done, partial or skipped, with your fill price.
-7. **Tracking** shows the gap between your recorded positions and the model.
+6. **Ticket page → record executions:** done, partial, **extra** (bought more than the ticket — the fund counts the
+   ticket quantity, the rest shows under Other holdings) or skipped, with your fill price. A price the stock didn't
+   trade at since the fill date (an older holding's cost, a later buy) or more than 20% from the reference brings up
+   a review; **Save anyway** keeps it as entered and marks the line.
+7. **Tracking** shows the gap between your recorded positions and the model, and the capital not deployed per sleeve
+   (model holdings you don't own — the next ticket will not buy them on its own).
+8. **Other holdings** records what you hold outside the books, so rebalance decisions see your whole position
+   (`GET /api/fund/other-holdings`).
 
 - **First run of a model version** is an *initial build*: it buys the whole model book at target weights, sized to
   **Capital**.

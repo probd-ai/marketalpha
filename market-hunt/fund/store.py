@@ -1,7 +1,8 @@
 """Persistence for the trading desk (Mongo). The only module of the fund package that writes.
 
 Collections: fund_config (one doc), fund_runs (snapshots; immutable once PUBLISHED except execution status),
-fund_executions (one doc per run line), fund_journal (append-only audit log).
+fund_executions (one doc per run line), fund_journal (append-only audit log), fund_cashflows, fund_other_holdings
+(holdings outside the books, one doc per symbol).
 """
 from __future__ import annotations
 
@@ -89,6 +90,11 @@ class FundStore:
             return False
         return r.modified_count == 1
 
+    def latest_run(self, version: int) -> dict | None:
+        """Newest computed run of a model version that has not been discarded (draft or published)."""
+        return self.db.fund_runs.find_one({"version": version, "status": {"$ne": "DISCARDED"}},
+                                          sort=[("created_at", -1)])
+
     def set_status(self, run_id: str, status: str, **extra) -> None:
         self.db.fund_runs.update_one({"_id": run_id}, {"$set": {"status": status, **extra}})
 
@@ -100,6 +106,18 @@ class FundStore:
     def executions(self, run_id: str | None = None) -> list[dict]:
         q = {"run_id": run_id} if run_id else {}
         return list(self.db.fund_executions.find(q, {"_id": 0}))
+
+    # -- other holdings (outside the books) ---------------------------------------------------------------------
+    def set_other_holding(self, symbol: str, doc: dict | None) -> None:
+        """Replace one symbol's other holding; None removes it."""
+        if doc is None:
+            self.db.fund_other_holdings.delete_one({"_id": symbol})
+        else:
+            self.db.fund_other_holdings.replace_one({"_id": symbol}, plain({**doc, "updated_at": _now()}),
+                                                    upsert=True)
+
+    def other_holdings(self) -> list[dict]:
+        return [{"symbol": d.pop("_id"), **d} for d in self.db.fund_other_holdings.find({}).sort("_id", 1)]
 
     # -- cash flows --------------------------------------------------------------------------------------------
     def add_cashflow(self, version: int, amount: float, note: str) -> dict:

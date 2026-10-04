@@ -10,6 +10,8 @@ const NAV = [
   { href: "/runs", label: "Runs" },
   { href: "/books", label: "Books" },
   { href: "/tracking", label: "Tracking" },
+  { href: "/holdings", label: "Other holdings" },
+  { href: "/broadcast", label: "AI Broadcast" },
   { href: "/cash", label: "Cash" },
   { href: "/journal", label: "Journal" },
   { href: "/settings", label: "Settings" },
