@@ -39,7 +39,14 @@ npm start                # http://localhost:3300
 8. **Streak watch** (daily, after the refresh): Grid-10 holdings whose mean_long has dropped below its 222-session
    average are flagged **exit**; replace each with Grid-10's first pick that is above its average. Record both on
    **Tracking → Manual trades** (the model is not changed — skip later ticket lines for those stocks).
-9. **Other holdings** records what you hold outside the books, so rebalance decisions see your whole position
+9. **Performance** shows the model from model start: the fund vs Nifty 50 (returns, CAGR after a full year,
+   volatility, Sharpe/Sortino at 0% risk-free, drawdowns, monthly grid, contribution by sleeve, sleeve weights and
+   rebalances) and each book vs its index and an equal-weight point-in-time basket of its universe, with
+   position-level trade analysis (hit rate, win/loss, holding period, turnover, every stock's P&L — top 10 winners
+   and losers, expandable to all). A switch shows the whole page **since model start** or **this year to date**
+   (holdings carried in at 31 Dec's close; the current year's closed positions). These are model
+   figures (`GET /api/fund/performance`, replayed with the runs' schedule, cached ~15 min), not your fills.
+10. **Other holdings** records what you hold outside the books, so rebalance decisions see your whole position
    (`GET /api/fund/other-holdings`).
 
 - **First run of a model version** is an *initial build*: it buys the whole model book at target weights, sized to

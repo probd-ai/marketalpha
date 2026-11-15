@@ -96,30 +96,16 @@ def latest_bench_date(db) -> date | None:
     return best.date() if best else None
 
 
-def compute_run(db, store, today: date | None = None, progress=lambda msg: None) -> dict:
-    today = today or date.today()
-    cfg = store.get_config()
-    errs = validate(cfg, today)
-    if errs:
-        raise RunRefused("; ".join(errs))
+def _plan(cfg: dict, published: list[dict], bench: pd.Series, holidays: tuple) -> dict:
+    """The model's calendar, shared by compute_run and performance so both replay exactly the same rebalances:
+    signal day S (latest bench close), fill session F, each sleeve's schedule (back-filled weekdays before the first
+    published run, then every published fill, then F) and the fund's reset / drift-band days."""
     ms = date.fromisoformat(cfg["model_start"])
-    cap = float(cfg["capital"])
-    costs = Costs(*charge_rates(), float(cfg["slippage_bp"]) / 1e4)
-    published = store.published_runs(cfg["version"])
     pub_fill = sorted(pd.Timestamp(r["fill_date"]) for r in published)
     first_pub = pub_fill[0] if pub_fill else None
-
-    markets = {}
-    for sl in cfg["sleeves"]:
-        progress(f"loading {sl['label']}")
-        markets[sl["id"]] = _market(db, sl, ms, today)
-    bench = next(iter(markets.values())).closes[BENCH]
     S = bench.dropna().index[-1]
-    holidays = tuple(sorted(market_holidays(db)))
     F = next_session(S, holidays)              # a holiday is never the fill session (Gandhi Jayanti 2026-10-02)
     week = list(F.isocalendar()[:2])
-    if any(list(pd.Timestamp(r["fill_date"]).isocalendar()[:2]) == week for r in published):
-        raise RunRefused(f"a run is already published for ISO week {week[0]}-W{week[1]:02d}")
     cal = trading_days(bench, ms, S)
     in_f_week = lambda d: list(d.isocalendar()[:2]) == week
     k = int(cfg.get("backfill_weekday", 0))
@@ -143,6 +129,33 @@ def compute_run(db, store, today: date | None = None, progress=lambda msg: None)
             first_run_days.add(d)
             if d.month in months:
                 reset_days.add(d)
+    return {"S": S, "F": F, "week": week, "scheds": scheds, "months": months, "band": band,
+            "first_run_days": first_run_days, "reset_days": reset_days}
+
+
+def compute_run(db, store, today: date | None = None, progress=lambda msg: None) -> dict:
+    today = today or date.today()
+    cfg = store.get_config()
+    errs = validate(cfg, today)
+    if errs:
+        raise RunRefused("; ".join(errs))
+    ms = date.fromisoformat(cfg["model_start"])
+    cap = float(cfg["capital"])
+    costs = Costs(*charge_rates(), float(cfg["slippage_bp"]) / 1e4)
+    published = store.published_runs(cfg["version"])
+
+    markets = {}
+    for sl in cfg["sleeves"]:
+        progress(f"loading {sl['label']}")
+        markets[sl["id"]] = _market(db, sl, ms, today)
+    bench = next(iter(markets.values())).closes[BENCH]
+    holidays = tuple(sorted(market_holidays(db)))
+    pl = _plan(cfg, published, bench, holidays)
+    S, F, week = pl["S"], pl["F"], pl["week"]
+    if any(list(pd.Timestamp(r["fill_date"]).isocalendar()[:2]) == week for r in published):
+        raise RunRefused(f"a run is already published for ISO week {week[0]}-W{week[1]:02d}")
+    scheds, months, band = pl["scheds"], pl["months"], pl["band"]
+    first_run_days, reset_days = pl["first_run_days"], pl["reset_days"]
 
     # replay each sleeve through the published checkpoints to S, then one projected step to F
     cps = [pd.Timestamp(r["signal_date"]) for r in published]
@@ -656,3 +669,176 @@ def actual_book(store, price_of=None) -> dict:
             "tracking_value": sum(abs(r["gap_value"]) for r in rows if r["gap_value"] is not None),
             "sleeves": sl, "undeployed": sum(s["under_value"] for s in sl),
             "other_value": other_holdings_view(store, price_of)["value"]}
+
+
+# ------------------------------------------------------------------------------------------------- performance
+# closest stored index per sleeve universe (no Nifty 200 / Total Market series in the database)
+INDEX_BENCH = {"NIFTY50": "Nifty 50", "NIFTY100": "Nifty 100", "NIFTY200": "Nifty 100", "NIFTY500": "Nifty 500",
+               "NIFTY500MICRO750": "Nifty 500", "NIFTYMIDCAP150": "Nifty Midcap 150",
+               "NIFTYSMALLCAP250": "Nifty Smallcap 250", "NIFTYMICROCAP250": "Nifty Microcap 250"}
+PERF_TTL_S = 900
+_perf_cache: dict = {}
+_perf_lock = threading.Lock()
+
+
+def _round(xs, nd=4):
+    return [None if x is None or (isinstance(x, float) and not math.isfinite(x)) else round(float(x), nd) for x in xs]
+
+
+def _closes(m, d, symbols) -> dict[str, float]:
+    """Close of each symbol on session `d` (forward-filled, so a halted stock keeps its last price); unpriced left out."""
+    row = m.cclose.loc[d]
+    return {s: float(row[s]) for s in symbols if s in row.index and not pd.isna(row[s])}
+
+
+def _index_series(db, name: str, ms: date) -> pd.Series:
+    from .data import load_from, load_prices
+    _, closes = load_prices(db, [name], load_from(ms))[:2]
+    if name not in closes.columns or closes[name].dropna().empty:
+        raise RunRefused(f"no prices stored for benchmark {name!r}")
+    return closes[name]
+
+
+def performance(db, store, today: date | None = None, extra_start: date | None = None) -> dict:
+    """The model fund and each book replayed from model start to the latest close, with the exact schedule the runs
+    use (see _plan), shown for two periods: since model start, and the current calendar year. Model figures, not the
+    manager's fills. Cached per (version, config, published runs, latest close) for PERF_TTL_S seconds.
+    `extra_start` adds a third period from the last close on or before that date (uncached; used by tests)."""
+    from . import performance as P
+    today = today or date.today()
+    cfg = store.get_config()
+    errs = validate(cfg, today)
+    if errs:
+        raise RunRefused("; ".join(errs))
+    published = store.published_runs(cfg["version"])
+    key = (cfg["version"], cfg.get("updated_at"), tuple(r["_id"] for r in published), str(latest_bench_date(db)),
+           today.isoformat())
+    with _perf_lock:
+        hit = _perf_cache.get(key)
+        if extra_start is None and hit and (datetime.now(timezone.utc).timestamp() - hit[0]) < PERF_TTL_S:
+            return hit[1]
+
+    ms = date.fromisoformat(cfg["model_start"])
+    cap = float(cfg["capital"])
+    costs = Costs(*charge_rates(), float(cfg["slippage_bp"]) / 1e4)
+    markets = {sl["id"]: _market(db, sl, ms, today) for sl in cfg["sleeves"]}
+    bench = next(iter(markets.values())).closes[BENCH]
+    pl = _plan(cfg, published, bench, tuple(sorted(market_holidays(db))))
+    S = pl["S"]
+
+    # Every curve is anchored at its starting capital (1.0) on the close before model start: the replay's first point
+    # is day 1's close, after the opening build, so without the anchor day 1's move would be missing from returns
+    # while present in P&L.
+    anchor = bench.loc[:pd.Timestamp(ms) - pd.Timedelta(days=1)].dropna().index[-1]
+    curves, orders = {}, {}
+    for sl in cfg["sleeves"]:
+        res = replay_sleeve(_book(sl), markets[sl["id"]], costs, ms, S, pl["scheds"][sl["id"]], 1.0)
+        curves[sl["id"]] = pd.concat([pd.Series([1.0], index=[anchor]), res.equity])
+        orders[sl["id"]] = res.orders
+    weights = {sl["id"]: float(sl["weight"]) for sl in cfg["sleeves"]}
+    idx = curves[next(iter(curves))].index
+    px = pd.DataFrame({k: v.reindex(idx).ffill() for k, v in curves.items()})
+    first = {idx[1]}                     # the engine never rebalances on its first session (it starts at target)
+    fr = blend(px, weights, float(cfg["reset_cost"]), reset_days=pl["reset_days"] - first,
+               band_days=pl["first_run_days"] - first, band=pl["band"])
+
+    nifty = bench.reindex(idx).ffill()
+    fund_curve = cap * fr.equity
+    wnow = fr.sleeve_values.iloc[-1] / fr.sleeve_values.iloc[-1].sum()
+    labels = {sl["id"]: sl["label"] for sl in cfg["sleeves"]}
+
+    # per-sleeve inputs that do not depend on the period: benchmark series and the full position history
+    static = {}
+    for sl in cfg["sleeves"]:
+        sid, m = sl["id"], markets[sl["id"]]
+        st = {"index_name": "Nifty 50", "index": nifty, "ew": None, "pos": None}
+        if sl["kind"] != "asset":
+            st["index_name"] = INDEX_BENCH.get(sl.get("universe"), BENCH)
+            st["index"] = nifty if st["index_name"] == BENCH else _index_series(db, st["index_name"], ms)
+            st["ew"] = P.ew_universe(m, curves[sid].index)
+            traded = sorted({o.symbol for os in orders[sid].values() for o in os})
+            st["traded"] = traded
+            st["pos"] = P.positions(orders[sid], _closes(m, S, traded))
+        static[sid] = st
+
+    def monthly(**series):
+        rows: dict[str, dict] = {}
+        for name, x in series.items():
+            for r in P.monthly_returns(x):
+                rows.setdefault(r["m"], {"m": r["m"]})[name] = r["r"]
+        return [rows[k] for k in sorted(rows)]
+
+    def window(lo: pd.Timestamp) -> tuple[dict, list]:
+        """Everything on the page for the period from the close of `lo` to S."""
+        fc, nf = fund_curve.loc[lo:], nifty.loc[lo:]
+        contrib, cost_pts = P.contribution(px.loc[lo:], fr.sleeve_values.loc[lo:])
+        sv = fr.sleeve_values.loc[lo:]
+        fund = {
+            "stats": P.series_stats(fc),
+            "relative": [P.relative(fc, nf, "Nifty 50", "index")],
+            "curve": {"dates": [str(d.date()) for d in fc.index], "fund": _round(fc, 0),
+                      "nifty": _round(float(fc.iloc[0]) * nf / float(nf.dropna().iloc[0]), 0)},
+            "drawdown": {"fund": _round(P.drawdown(fc), 3), "nifty": _round(P.drawdown(nf), 3)},
+            "monthly": monthly(fund=fc, nifty=nf),
+            "contribution": [{"id": k, "label": labels[k], "pts": v} for k, v in contrib.items()],
+            "reset_cost_pts": cost_pts,
+            "resets": [str(pd.Timestamp(d).date()) for d in fr.reset_days if pd.Timestamp(d) > lo],
+            "weights": {k: _round(100 * sv[k] / sv.sum(axis=1), 3) for k in weights},
+        }
+        books = []
+        for sl in cfg["sleeves"]:
+            sid, m, st = sl["id"], markets[sl["id"]], static[sl["id"]]
+            c = curves[sid].loc[lo:].dropna()
+            series = {"book": c, "index": st["index"]}
+            rel = [P.relative(c, st["index"], st["index_name"], "index")]
+            if st["ew"] is not None:
+                series["ew"] = st["ew"]
+                rel.append(P.relative(c, st["ew"], f"Equal-weight {sl.get('universe')}", "ew"))
+            trades = None
+            if st["pos"] is not None:
+                v0, v1 = float(c.iloc[0]), float(c.iloc[-1])
+                trades = P.trade_summary(st["pos"], base=v0, closed_after=None if lo == anchor else str(lo.date()))
+                for p_ in trades["open"]:
+                    p_["weight"] = 100 * p_.pop("value") / v1
+                    p_.pop("qty")
+                trades["orders"] = sum(len(os) for d, os in orders[sid].items() if pd.Timestamp(d) > lo)
+                trades["turnover"] = P.turnover(orders[sid], c)
+                trades["pnl_by_symbol"] = P.symbol_pnl(orders[sid], lo, _closes(m, lo, st["traded"]),
+                                                       _closes(m, S, st["traded"]), base=v0)
+            books.append({
+                "id": sid, "label": sl["label"], "kind": sl["kind"], "universe": sl.get("universe"),
+                "symbol": sl.get("symbol"), "index_name": st["index_name"],
+                "target_weight": 100 * weights[sid], "weight": 100 * float(wnow[sid]), "contribution_pts": contrib[sid],
+                "stats": P.series_stats(c), "relative": rel,
+                "curve": P.series_payload(c.index, **series),
+                "drawdown": {k: _round(P.drawdown(v.reindex(c.index).ffill()), 3) for k, v in series.items()},
+                "monthly": monthly(**series),
+                "trades": trades,
+            })
+        return fund, books
+
+    # periods: the whole model, and the current calendar year (from the last close of the previous year; when the
+    # model started this year the two are the same period and are flagged so)
+    prior = bench.loc[:pd.Timestamp(S.year - 1, 12, 31)].dropna()
+    ytd_lo = max(prior.index[-1], anchor) if len(prior) else anchor
+    wanted = [("all", "Since model start", anchor), ("ytd", f"{S.year} to date", ytd_lo)]
+    if extra_start is not None:
+        lo = bench.loc[:pd.Timestamp(extra_start)].dropna().index[-1]
+        if not anchor < lo < S:
+            raise RunRefused(f"extra_start must fall inside the model's history ({anchor.date()} .. {S.date()})")
+        wanted.append(("custom", f"From {lo.date()}", lo))
+    periods = []
+    for pid, label, lo in wanted:
+        f_, b_ = window(lo)
+        periods.append({"id": pid, "label": label, "start": str(lo.date()), "same_as_all": pid != "all" and lo == anchor,
+                        "fund": f_, "books": b_})
+
+    out = {"as_of": str(S.date()), "model_start": cfg["model_start"], "version": cfg["version"], "capital": cap,
+           "risk_free": 0.0, "computed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "periods": periods}
+    if extra_start is not None:
+        return out
+    with _perf_lock:
+        _perf_cache.clear()
+        _perf_cache[key] = (datetime.now(timezone.utc).timestamp(), out)
+    return out

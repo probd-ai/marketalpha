@@ -319,6 +319,15 @@ def books():
                 "curve": r["curve"], "sleeves": r["sleeves"]})
 
 
+@router.get("/performance")
+def performance():
+    """Model performance from model start: the whole fund and every book (replayed on request, cached ~15 min)."""
+    try:
+        return _ok(service.performance(mongo_conn.db, _store()))
+    except service.RunRefused as e:
+        _refused(e)
+
+
 @router.get("/actual")
 def actual():
     st = _store()

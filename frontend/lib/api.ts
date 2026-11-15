@@ -89,6 +89,50 @@ export interface CashFlow {
 }
 export interface JournalEntry { at: string; event: string; detail: Record<string, unknown> }
 
+// ---- performance (GET /api/fund/performance): the model replayed from model start; percent units throughout
+export interface DatedReturn { date: string; r: number }
+export interface MonthReturn { m: string; r: number }
+export interface PerfStats {
+  start: string; end: string; sessions: number; years: number; total_return: number; cagr: number | null;
+  vol: number | null; sharpe: number | null; sortino: number | null; max_dd: number; max_dd_peak: string;
+  max_dd_trough: string; max_dd_recovered: string | null; dd_now: number; best_day: DatedReturn | null;
+  worst_day: DatedReturn | null; best_month: MonthReturn | null; worst_month: MonthReturn | null; months: number;
+  pct_months_positive: number | null;
+}
+export interface Relative {
+  name: string; kind: "index" | "ew"; total_return: number | null; excess: number | null; beta: number | null; corr: number | null;
+}
+export type MonthlyRow = { m: string } & Partial<Record<"fund" | "nifty" | "book" | "index" | "ew", number>>;
+export interface ClosedTrade { symbol: string; opened: string; closed: string; days: number; ret: number | null; pnl_pts: number }
+export interface OpenPosition { symbol: string; opened: string; weight: number; ret: number | null; pnl_pts: number }
+export interface TradeStats {
+  orders: number; closed_count: number; open_count: number;   // closed_count: positions closed within the period
+  hit_rate: number | null; avg_win: number | null; avg_loss: number | null; expectancy: number | null;
+  avg_days: number | null; turnover: number | null; closed: ClosedTrade[]; open: OpenPosition[];
+  pnl_by_symbol: { symbol: string; pts: number }[];             // every stock held or traded in the period, best first
+}
+export interface BookPerf {
+  id: string; label: string; kind: "grid10" | "tranche" | "asset"; universe: string | null; symbol: string | null;
+  index_name: string; target_weight: number; weight: number; contribution_pts: number; stats: PerfStats;
+  relative: Relative[];
+  curve: { dates: string[]; book: (number | null)[]; index?: (number | null)[]; ew?: (number | null)[] };
+  drawdown: { book: (number | null)[]; index?: (number | null)[]; ew?: (number | null)[] };
+  monthly: MonthlyRow[]; trades: TradeStats | null;
+}
+export interface FundPerf {
+  stats: PerfStats; relative: Relative[]; curve: Curve;
+  drawdown: { fund: (number | null)[]; nifty: (number | null)[] };
+  monthly: MonthlyRow[]; contribution: { id: string; label: string; pts: number }[]; reset_cost_pts: number;
+  resets: string[]; weights: Record<string, (number | null)[]>;
+}
+export interface PeriodPerf {
+  id: "all" | "ytd" | "custom"; label: string; start: string; same_as_all: boolean; fund: FundPerf; books: BookPerf[];
+}
+export interface Performance {
+  as_of: string; model_start: string; version: number; capital: number; risk_free: number; computed_at: string;
+  periods: PeriodPerf[];
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string, public detail?: unknown) { super(message); }
 }
@@ -132,6 +176,7 @@ export const api = {
       { method: "POST", body: JSON.stringify(items) }),
   books: () => req<{ run_id: string | null; signal_date?: string; fund?: FundSummary; books: Book[]; curve?: Curve; sleeves?: SleeveSummary[] }>("/api/fund/books"),
   actual: () => req<Actual>("/api/fund/actual"),
+  performance: () => req<Performance>("/api/fund/performance"),
   streakWatch: () => req<StreakWatch>("/api/fund/streak-watch"),
   manualTrades: () => req<ManualTrade[]>("/api/fund/manual-trades"),
   addManualTrade: (t: { sleeve: string; symbol: string; side: "BUY" | "SELL"; qty: number; price: number; note?: string; trade_date?: string }) =>
