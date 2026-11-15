@@ -20,7 +20,8 @@ REASON_TEXT = {
     Reason.TRANCHE_ROLL: "Picked again — expiring tranche rolled into a new one",
     Reason.TRANCHE_EXPIRED: "Tranche reached its 8-week clock",
     Reason.TRIM_ABOVE_CAP: "Holding above the 10% cap — trimmed back",
-    Reason.CASH_DEPLOY: "Leftover cash deployed up to the 10% cap",
+    Reason.TRIM_TO_FUND: "Largest holding trimmed to pay for a full new tranche",
+    Reason.CASH_DEPLOY:"Leftover cash deployed up to the 10% cap",
     Reason.INDEX_EXIT: "Left its index{exit_note} — forced sale",
     Reason.MONTHLY_RESET: "Fund rebalance — sleeves restored to their target weights",
     Reason.INITIAL_BUILD: "Initial build — model holding bought to start the fund",
@@ -79,13 +80,18 @@ def held_before_ticket(held_now: dict, missed: list[tuple]) -> dict:
     return {s: q for s, q in out.items() if q > 1e-12}
 
 
-def build_ticket(sleeves: dict, ref_px: dict, band: float = 0.003) -> tuple[list[TicketLine], list[dict]]:
+def build_ticket(sleeves: dict, ref_px: dict, band: float = 0.003, min_trim: float = 0.0,
+                 carried: dict | None = None) -> tuple[list[TicketLine], list[dict]]:
     """sleeves: {name: {"orders": [Order], "scale": float, "held_before": {sym: model_qty},
                         "held_after": {sym: model_qty}, "reset_factor": float | None, "ctx": {sym: {...}}}}
     reset_factor: sleeve rupees after the monthly reset and/or cash flow / before (None when neither applies);
     resize_reasons: reasons shown on those resize lines (default MONTHLY_RESET).
-    Returns (lines, residuals) — residuals are nets smaller than one share."""
+    min_trim / carried: a line that is only a cap trim and worth less than `min_trim` rupees is not ticketed; its
+    shares are returned as a `deferred_trim` residual and come back as `carried` {(sleeve, symbol): shares} on the next
+    run, so hidden trims accumulate and trade once together they are worth it (never drift unbounded).
+    Returns (lines, residuals) — residuals are nets smaller than one share, plus deferred trims."""
     lines, residual = [], []
+    carried = carried or {}
     for name, sl in sleeves.items():
         scale = sl["scale"]
         net: dict[str, float] = {}
@@ -99,10 +105,20 @@ def build_ticket(sleeves: dict, ref_px: dict, band: float = 0.003) -> tuple[list
             for sym, q in sl["held_after"].items():
                 net[sym] = net.get(sym, 0.0) + q * scale * (rf - 1)
                 why.setdefault(sym, []).extend(sl.get("resize_reasons") or [Reason.MONTHLY_RESET])
+        for (cs, sym), sh in carried.items():
+            if cs == name and sl["held_after"].get(sym, 0.0) > 1e-12:     # an exit sells everything anyway
+                net[sym] = net.get(sym, 0.0) + sh
+                why.setdefault(sym, []).append(Reason.TRIM_ABOVE_CAP)
         for sym in sorted(net):
             shares = net[sym]
             px = float(ref_px[sym])
             full_exit = sym in sl["held_before"] and sl["held_after"].get(sym, 0.0) <= 1e-12
+            trim_only = set(why[sym]) <= {Reason.TRIM_ABOVE_CAP} and shares < 0
+            # judged on the whole shares that would actually trade (the line rounds down)
+            if min_trim > 0 and trim_only and not full_exit and math.floor(abs(shares) + 1e-9) * px < min_trim:
+                residual.append({"sleeve": name, "symbol": sym, "model_shares": shares, "deferred_trim": True,
+                                 "value": abs(shares) * px})
+                continue
             if full_exit:
                 qty = int(round(sl["held_before"][sym] * scale))
             else:

@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 from . import checks as C
-from .config import validate
+from .config import MIN_TRIM_DEFAULT, validate
 from .data import BENCH, build_asset_market, build_market, charge_rates, market_holidays
 from .engine import ENGINE_VERSION
 from .engine.calendar import trading_days
@@ -233,7 +233,12 @@ def compute_run(db, store, today: date | None = None, progress=lambda msg: None)
                             "held_after": after,
                             "reset_factor": resize[sid] if resize else None, "resize_reasons": resize_reasons,
                             "ctx": ctx}
-    lines, residual = build_ticket(tsl, ref, float(cfg["limit_band"]))
+    # cap trims worth less than min_trim_value are held back and carried to the next ticket until they add up
+    carried = {} if initial else {(r["sleeve"], r["symbol"]): float(r["model_shares"])
+                                  for r in (store.get_run(published[-1]["_id"]) or {}).get("residuals", [])
+                                  if r.get("deferred_trim")}
+    lines, residual = build_ticket(tsl, ref, float(cfg["limit_band"]),
+                                   min_trim=float(cfg.get("min_trim_value", MIN_TRIM_DEFAULT)), carried=carried)
     tick = [l.to_dict() for l in lines]
 
     # checks
@@ -536,6 +541,60 @@ def _published_executions(store) -> list[dict]:
     return [e for e in store.executions() if e["run_id"] in ids and e["status"] != "skipped" and e.get("qty")]
 
 
+def actual_positions(store) -> dict[tuple, int]:
+    """{(sleeve label, symbol): shares the manager holds in the fund}: published ticket executions plus manual trades
+    (overlay sells/buys recorded outside a ticket) of the current model version."""
+    cfg = store.get_config()
+    pos: dict[tuple, int] = {}
+    for e in _published_executions(store):
+        k = (e["sleeve"], e["symbol"])
+        pos[k] = pos.get(k, 0) + (1 if e["side"] == "BUY" else -1) * _fund_qty(e)
+    for t in store.manual_trades(cfg["version"]):
+        k = (t["sleeve"], t["symbol"])
+        pos[k] = pos.get(k, 0) + (1 if t["side"] == "BUY" else -1) * int(t["qty"])
+    return pos
+
+
+def record_manual_trade(store, t: dict, known) -> dict:
+    """A trade made outside a ticket (e.g. the streak-watch overlay: sell a value-core holding that broke its 222-SMA,
+    buy Grid-10's next pick). Counted by Tracking; the model is not changed. Refuses an unknown sleeve or symbol,
+    non-positive whole quantities or prices, and selling more than the sleeve holds."""
+    with _write_lock:
+        cfg = store.get_config()
+        labels = {s["label"] for s in cfg["sleeves"]}
+        sleeve = t.get("sleeve")
+        if sleeve not in labels:
+            raise RunRefused(f"sleeve must be one of {sorted(labels)}")
+        sym = str(t.get("symbol", "")).strip().upper()
+        if not known(sym):
+            raise RunRefused(f"unknown symbol {sym}")
+        side = t.get("side")
+        if side not in ("BUY", "SELL"):
+            raise RunRefused("side must be BUY or SELL")
+        q = t.get("qty")
+        if isinstance(q, bool) or not isinstance(q, int) or q <= 0:
+            raise RunRefused("qty must be a whole number of shares above 0")
+        px = t.get("price")
+        if isinstance(px, bool) or not isinstance(px, (int, float)) or not math.isfinite(px) or px <= 0:
+            raise RunRefused("price must be a positive number")
+        if side == "SELL":
+            have = actual_positions(store).get((sleeve, sym), 0)
+            if q > have:
+                raise RunRefused(f"{sleeve} holds {have} {sym}; cannot sell {q}")
+        doc = store.add_manual_trade({"version": cfg["version"], "sleeve": sleeve, "symbol": sym, "side": side,
+                                      "qty": q, "price": float(px), "note": str(t.get("note") or "")[:200],
+                                      "trade_date": str(t.get("trade_date") or date.today())[:10]})
+        store.journal("MANUAL_TRADE_RECORDED", {k: doc[k] for k in ("sleeve", "symbol", "side", "qty", "price", "note")})
+        return doc
+
+
+def delete_manual_trade(store, trade_id: str) -> None:
+    with _write_lock:
+        if not store.delete_manual_trade(trade_id):
+            raise RunRefused("manual trade not found")
+        store.journal("MANUAL_TRADE_DELETED", {"id": trade_id})
+
+
 def other_holdings_view(store, price_of=None) -> dict:
     """Everything held outside the books: manual entries plus the surplus of `extra` fills on published tickets,
     valued at the latest close where known."""
@@ -565,11 +624,7 @@ def actual_book(store, price_of=None) -> dict:
     deployed (sum of under-invested — the next ticket does not buy it back on its own) and the value of other
     holdings (outside the books), which are never counted as gaps."""
     cfg = store.get_config()
-    pos: dict[tuple, dict] = {}
-    for e in _published_executions(store):
-        k = (e["sleeve"], e["symbol"])
-        p = pos.setdefault(k, {"qty": 0})
-        p["qty"] += (1 if e["side"] == "BUY" else -1) * _fund_qty(e)
+    pos = {k: {"qty": q} for k, q in actual_positions(store).items()}
     latest = store.latest_run(cfg["version"])
     model = {}
     if latest:

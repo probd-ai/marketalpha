@@ -9,7 +9,7 @@ import { TicketTable } from "@/components/TicketTable";
 import { Badge, Button, Card, ErrorBox, Loading } from "@/components/ui";
 import { api, priceWarnings, type ExecStatus, type ExecutionItem, type PriceWarning, type TicketLine } from "@/lib/api";
 import { draftFor, needsQty, toItem, type Draft } from "@/lib/executions";
-import { day, price } from "@/lib/format";
+import { day, price, rupees } from "@/lib/format";
 
 export default function TicketPage() {
   const { id } = useParams<{ id: string }>();
@@ -146,6 +146,18 @@ export default function TicketPage() {
       )}
       {!review && <ErrorBox error={save.error} />}
       <Card><TicketTable lines={r.ticket} extra={cell} /></Card>
+      {(r.residuals ?? []).some((x) => x.deferred_trim) && (
+        <Card title="Small trims held back">
+          <div className="mb-2 text-[12.5px] text-muted">
+            Cap trims below the minimum trim are not on this ticket. They carry forward and appear once together they are worth trading.
+          </div>
+          <div className="flex flex-wrap gap-x-5 gap-y-1 text-[13px]">
+            {(r.residuals ?? []).filter((x) => x.deferred_trim).map((x) => (
+              <span key={`${x.sleeve}|${x.symbol}`}><b>{x.symbol}</b> <span className="text-muted">{x.sleeve} · {Math.abs(x.model_shares).toFixed(1)} sh · {rupees(x.value ?? null)}</span></span>
+            ))}
+          </div>
+        </Card>
+      )}
     </div>
   );
 }

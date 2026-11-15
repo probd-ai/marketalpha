@@ -92,3 +92,82 @@ def test_index_exit_sold_same_day():
     st = SleeveState(cash=0.0, lots=_lots(A=[(1.0, 1)]))
     orders = Tranche().on_day(st, m, ZERO, idx, 1, idx[0], False)
     assert orders[0].reason == Reason.INDEX_EXIT and "A" not in st.lots
+
+
+# ---------------------------------------------------------------- trim band: trim only above trim_at, back to max_w
+def _held(weights_pct):
+    """A sleeve of 1000 holding A..: each at the given % of equity (price 100), rest in cash."""
+    lots = {s: [(w * 10 / 100.0, 1)] for s, w in zip("ABCDE", weights_pct)}
+    st = SleeveState(cash=1000.0 - sum(w * 10 for w in weights_pct), params={})
+    st.lots = _lots(**lots)
+    return st
+
+
+def test_default_trims_anything_above_the_cap():
+    m, idx = _market([0.0] * 8)
+    st = _held([12])
+    orders = _step(m, idx, st, Tranche(5, 8, 40, 0.10, False))
+    assert any(o.symbol == "A" and o.reason == Reason.TRIM_ABOVE_CAP for o in orders)
+
+
+def test_band_leaves_a_holding_between_cap_and_trim_at_alone():
+    m, idx = _market([0.0] * 8)
+    st = _held([12])
+    orders = _step(m, idx, st, Tranche(5, 8, 40, 0.10, False, trim_at=0.15))
+    assert not [o for o in orders if o.reason == Reason.TRIM_ABOVE_CAP]
+    assert st.qty("A") == pytest.approx(1.2)
+
+
+def test_band_trims_back_to_the_cap_once_above_trim_at():
+    m, idx = _market([0.0] * 8)
+    st = _held([16])
+    orders = _step(m, idx, st, Tranche(5, 8, 40, 0.10, False, trim_at=0.15))
+    trims = [o for o in orders if o.reason == Reason.TRIM_ABOVE_CAP]
+    assert [o.symbol for o in trims] == ["A"]
+    assert st.qty("A") * 100 == pytest.approx(0.10 * 1000.0)        # back to 10%, not 15%
+
+
+# ---------------------------------------------------------------- full_slot: a new tranche is always a full slot
+def _full_book(**kw):
+    return Tranche(5, 8, 40, 0.5, False, **kw)          # cap 50% so the cap trim stays out of the way
+
+
+def _invested():
+    st = SleeveState(cash=0.0)                           # fully invested: F 40%, G 30%, H 30%, no cash
+    st.lots = _lots(F=[(40.0, 1)], G=[(30.0, 1)], H=[(30.0, 1)])
+    return st
+
+
+def test_default_scales_new_tranches_to_the_cash_available():
+    m, idx = _market([0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.01])
+    st = _invested()
+    _step(m, idx, st, _full_book())
+    assert sum(st.qty(s) for s in "ABCDE") == pytest.approx(0.0)          # no cash -> no new money
+
+
+def test_full_slot_trims_the_largest_holdings_to_fund_full_tranches():
+    m, idx = _market([0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.01])
+    st = _invested()
+    orders = _step(m, idx, st, _full_book(full_slot=True))
+    slot = 10_000.0 / 40                                                  # 2.5% of the 10,000 sleeve
+    assert all(st.qty(s) * 100 == pytest.approx(slot) for s in "ABCDE")
+    # 1,250 raised by water-filling from the top: F, G, H all cut to the same level
+    assert [round(st.qty(s) * 100, 2) for s in "FGH"] == [pytest.approx(2916.67, abs=0.01)] * 3
+    assert {o.symbol for o in orders if o.reason == Reason.TRIM_TO_FUND} == set("FGH")
+    assert st.cash == pytest.approx(0.0, abs=1e-6)
+
+
+def test_full_slot_takes_from_the_single_largest_first():
+    m, idx = _market([0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.01])
+    st = SleeveState(cash=0.0)
+    st.lots = _lots(F=[(60.0, 1)], G=[(20.0, 1)], H=[(20.0, 1)])
+    _step(m, idx, st, _full_book(full_slot=True))
+    assert st.qty("F") * 100 == pytest.approx(6000.0 - 1250.0)            # only the largest is cut
+    assert st.qty("G") == pytest.approx(20.0) and st.qty("H") == pytest.approx(20.0)
+
+
+def test_full_slot_with_enough_cash_trims_nothing():
+    m, idx = _market([0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.01])
+    st = SleeveState(cash=4000.0)
+    orders = _step(m, idx, st, _full_book(full_slot=True))
+    assert not [o for o in orders if o.reason == Reason.TRIM_TO_FUND]

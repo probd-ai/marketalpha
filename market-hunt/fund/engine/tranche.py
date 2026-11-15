@@ -3,7 +3,8 @@
 Daily step:
   1. sell holdings that are not index members today (at the open, or the last close once trading has stopped);
   2. on a rebalance day, from Alpha-eligible members rank by 22-day return, pick the top `top`;
-       a) trim any holding above `max_w` of equity back to it (every lot shrinks pro rata);
+       a) trim any holding above `max_w` of equity back to it (every lot shrinks pro rata); with a trim band
+          (`trim_at` > max_w) only holdings above `trim_at` are trimmed, still back to max_w;
        b) per symbol: lots younger than `weeks` rebalances stay, older lots expire; a pick adds a tranche of
           equity/slot_div, capped so the holding stays within max_w; expiry and new tranche net into one order;
        c) net sells, then buys scaled to the cash available;
@@ -31,8 +32,27 @@ class Tranche:
     kind = "tranche"
 
     def __init__(self, top: int = 5, weeks: int = 8, slot_div: int | None = 40, max_w: float | None = 0.10,
-                 deploy_cash: bool = True):
+                 deploy_cash: bool = True, trim_at: float | None = None, full_slot: bool = False):
         self.top, self.weeks, self.slot_div, self.max_w, self.deploy_cash = top, weeks, slot_div, max_w, deploy_cash
+        # trim band: a winner is trimmed only once it exceeds trim_at, and then back to max_w. None = trim at max_w
+        # (the researched rule). New buys and cash deployment are always limited by max_w.
+        self.trim_at = trim_at
+        # full_slot: a new tranche is always a full slot; when cash is short the gap is raised by trimming the largest
+        # holdings (water-filled from the top) instead of scaling the new tranches down. False = the researched rule.
+        self.full_slot = full_slot
+
+    @staticmethod
+    def _water_level(values: list[float], raise_gross: float) -> float:
+        """The level L at which cutting every value above L down to L frees `raise_gross` (largest cut first)."""
+        vs = sorted(values, reverse=True)
+        total = 0.0
+        for k, v in enumerate(vs, 1):
+            total += v
+            level = (total - raise_gross) / k
+            nxt = vs[k] if k < len(vs) else 0.0
+            if level >= nxt:
+                return max(level, 0.0)
+        return 0.0
 
     def on_day(self, st: SleeveState, m: Market, costs: Costs, cal: pd.DatetimeIndex, i: int, prev,
                rebalance: bool) -> list[Order]:
@@ -72,11 +92,12 @@ class Tranche:
         equity = st.cash + sum(qty(s) * px(s) for s in tr)
         slot = equity / (self.slot_div or self.top * self.weeks)
         if self.max_w:                                              # a) trim winners back to the cap
+            trigger = max(self.trim_at or self.max_w, self.max_w)
             for s in list(tr):
                 if _nan(m.opens.at[d, s]):
                     continue
                 v = qty(s) * m.opens.at[d, s]
-                if v > self.max_w * equity:
+                if v > trigger * equity:
                     f = self.max_w * equity / v
                     sold = qty(s) * (1 - f)
                     proceeds = sold * m.opens.at[d, s] * (1 - slip) * (1 - sr)
@@ -107,6 +128,21 @@ class Tranche:
                 tr[s] = keep + [Lot(s, expiring, d.date(), self.weeks)]
         buys = {s: v for s, v in plan.items() if v[2] - v[1] > 0}
         need = sum((new_q - expiring) * m.opens.at[d, s] for s, (_, expiring, new_q) in buys.items())
+        gap = need * (1 + slip) * (1 + br) - st.cash if need > 0 else 0.0
+        if self.full_slot and gap > 1e-9:                           # raise the shortfall from the largest holdings
+            vals = {s: qty(s) * m.opens.at[d, s] for s in sorted(tr)
+                    if s not in buys and not _nan(m.opens.at[d, s]) and qty(s) > 0}
+            if vals:
+                level = self._water_level(list(vals.values()), gap / ((1 - slip) * (1 - sr)))
+                for s, v in vals.items():
+                    if v <= level + 1e-9:
+                        continue
+                    f = level / v
+                    sold = qty(s) * (1 - f)
+                    proceeds = sold * m.opens.at[d, s] * (1 - slip) * (1 - sr)
+                    st.cash += proceeds
+                    tr[s] = [Lot(t.symbol, t.qty * f, t.opened, t.age) for t in tr[s]]
+                    orders.append(Order(s, "SELL", sold, float(m.opens.at[d, s]), proceeds, Reason.TRIM_TO_FUND))
         scale = min(1.0, st.cash / (need * (1 + slip) * (1 + br))) if need > 0 else 0.0
         for s, (keep, expiring, new_q) in buys.items():
             net = (new_q - expiring) * scale

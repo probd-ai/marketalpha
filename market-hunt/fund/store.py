@@ -119,6 +119,18 @@ class FundStore:
     def other_holdings(self) -> list[dict]:
         return [{"symbol": d.pop("_id"), **d} for d in self.db.fund_other_holdings.find({}).sort("_id", 1)]
 
+    # -- manual trades (outside tickets) --------------------------------------------------------------------------
+    def add_manual_trade(self, doc: dict) -> dict:
+        doc = {"_id": f"MT{uuid.uuid4().hex[:8]}", **doc, "recorded_at": _now()}
+        self.db.fund_manual_trades.insert_one(plain(doc))
+        return doc
+
+    def manual_trades(self, version: int) -> list[dict]:
+        return list(self.db.fund_manual_trades.find({"version": version}).sort("recorded_at", 1))
+
+    def delete_manual_trade(self, trade_id: str) -> bool:
+        return self.db.fund_manual_trades.delete_one({"_id": trade_id}).deleted_count == 1
+
     # -- cash flows --------------------------------------------------------------------------------------------
     def add_cashflow(self, version: int, amount: float, note: str) -> dict:
         doc = {"_id": f"CF{uuid.uuid4().hex[:8]}", "version": version, "amount": amount, "note": note,

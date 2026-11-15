@@ -62,7 +62,8 @@ def rebalance_days(cal: pd.DatetimeIndex, freq: str) -> set:
 
 def run(opens, closes, roc, intervals, start, end, n, mode, freq, capital, slip,
         buy_rate, sell_rate, rng=None, buffer=0, exit_winners=0, log=None, eligible=None,
-        elig_exit=True, pick_fn=None, same_close=False, alpha_day1=False, held_log=None, book_log=None):
+        elig_exit=True, pick_fn=None, same_close=False, alpha_day1=False, held_log=None, book_log=None,
+        fixed_seats=False):
     """exit_winners>0: a holding is sold only when it ranks among the top `exit_winners` by ROC
     (the winners); every bottom-n name is bought. Book size floats, equal weight = equity/len(book).
     mode "alpha": only names with eligible[prev, s] True rank; highest `roc` first (pass the
@@ -74,7 +75,10 @@ def run(opens, closes, roc, intervals, start, end, n, mode, freq, capital, slip,
     same_close / alpha_day1: ENGINE-EMULATION knobs for reconciling with market-hunt — rank on the
     rebalance day's own close and fill at that close (look-ahead-ish), and break day-one ties
     alphabetically (the engine's no-warm-up bug). Never use them for honest results.
-    log: optional list that receives every fill as a dict (date, symbol, side, qty, px, value, cash_flow)."""
+    log: optional list that receives every fill as a dict (date, symbol, side, qty, px, value, cash_flow).
+    fixed_seats (pick_fn books): n seats of equity/n; only a NEW pick is bought (up to its seat, from cash),
+    retained names are never topped up and leftover cash stays idle — an unfilled seat is cash, not a bigger
+    bet on the names that remain. Default off (unchanged behaviour)."""
     cal = closes.index[(closes.index >= pd.Timestamp(start)) & closes[BENCH].notna()]
     if end is not None:
         cal = cal[cal <= pd.Timestamp(end)]
@@ -164,7 +168,8 @@ def run(opens, closes, roc, intervals, start, end, n, mode, freq, capital, slip,
             # value book at today's open (names with no open keep last close)
             px_open = {s: (fill.at[d, s] if not pd.isna(fill.at[d, s]) else cclose.at[prev, s]) for s in qty}
             equity = cash + sum(q * px_open[s] for s, q in qty.items())
-            target = equity / max(len(pick) if (exit_winners or mode == "alpha" or pick_fn) else n, 1)
+            target = equity / max(n if fixed_seats else
+                                  len(pick) if (exit_winners or mode == "alpha" or pick_fn) else n, 1)
             # sells first (dropped names, then trims), then buys
             for s in [s for s in qty if s not in pick]:
                 if not pd.isna(fill.at[d, s]):
@@ -173,13 +178,14 @@ def run(opens, closes, roc, intervals, start, end, n, mode, freq, capital, slip,
                 # never trim retained names; deploy ALL freed cash (no idle-cash drag):
                 # first fill each pick's shortfall to 1/n pro-rata, then spread any remainder equally
                 tradable = [s for s in pick if not pd.isna(fill.at[d, s])]   # a halted holding just waits
-                gaps = {s: max(target - qty.get(s, 0.0) * fill.at[d, s], 0.0) for s in tradable}
+                gaps = {s: (0.0 if fixed_seats and s in qty else max(target - qty.get(s, 0.0) * fill.at[d, s], 0.0))
+                        for s in tradable}
                 total_gap = sum(gaps.values())
                 budget = cash
                 alloc = {s: (budget * g / total_gap if total_gap > budget else g) for s, g in gaps.items()} \
                     if total_gap > 0 else {s: 0.0 for s in tradable}
                 rest = budget - sum(alloc.values())
-                if rest > 1e-6 and tradable:
+                if rest > 1e-6 and tradable and not fixed_seats:
                     for s in tradable:
                         alloc[s] += rest / len(tradable)
                 for s, v in alloc.items():

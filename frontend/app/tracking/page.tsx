@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 
+import { ManualTrades } from "@/components/ManualTrades";
 import { SortTable } from "@/components/SortTable";
 import { Card, Empty, ErrorBox, Kpi, Loading, Signed } from "@/components/ui";
 import { api, type ActualRow, type SleeveTracking } from "@/lib/api";
@@ -18,7 +19,7 @@ export default function Tracking() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-[20px] font-semibold">Tracking: model vs actual</h1>
-        <div className="text-muted">Actual = sum of your recorded executions on published tickets. Model = latest run&apos;s books in whole shares. Valued at the latest close.</div>
+        <div className="text-muted">Actual = your recorded executions on published tickets plus manual trades. Model = latest run&apos;s books in whole shares. Valued at the latest close.</div>
       </div>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
         <Kpi label="Positions with a gap" value={`${gaps.length} / ${d.rows.length}`} tone={gaps.length ? "bad" : "good"} />
@@ -53,6 +54,7 @@ export default function Tracking() {
             ]} />
         </Card>
       ) : <Empty>Nothing to compare yet — publish a ticket and record executions.</Empty>}
+      <ManualTrades />
     </div>
   );
 }

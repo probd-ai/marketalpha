@@ -70,3 +70,61 @@ def test_initial_build_buys_every_holding():
                             {"AAA": 100.0, "BBB": 50.0})
     assert [(l.symbol, l.side, l.qty) for l in lines] == [("AAA", "BUY", 30), ("BBB", "BUY", 15)]
     assert "Initial build" in lines[0].reason_text
+
+
+# ---------------------------------------------------------------- small trims: deferred, carried forward, emitted once large
+def _trim(sym, model_qty, held_after, scale=1.0):
+    from fund.engine.types import Order, Reason
+    return {"orders": [Order(sym, "SELL", model_qty, 204.05, model_qty * 204.05, Reason.TRIM_ABOVE_CAP)],
+            "scale": scale, "held_before": {sym: held_after + model_qty}, "held_after": {sym: held_after},
+            "reset_factor": None}
+
+
+def test_a_small_trim_is_deferred_not_ticketed():
+    lines, res = build_ticket({"Satellite": _trim("EMIL", 4, 551)}, {"EMIL": 204.05}, min_trim=5000)
+    assert lines == []
+    (d,) = [r for r in res if r.get("deferred_trim")]
+    assert (d["sleeve"], d["symbol"], d["model_shares"]) == ("Satellite", "EMIL", pytest.approx(-4))
+
+
+def test_deferred_trims_accumulate_until_they_are_worth_trading():
+    carried = {("Satellite", "EMIL"): -20.0}                             # earlier weeks' hidden trims
+    lines, res = build_ticket({"Satellite": _trim("EMIL", 6, 545)}, {"EMIL": 204.05}, min_trim=5000, carried=carried)
+    (l,) = lines
+    assert (l.side, l.symbol, l.qty) == ("SELL", "EMIL", 26) and not [r for r in res if r.get("deferred_trim")]
+
+
+def test_carried_trim_still_below_threshold_rolls_forward_alone():
+    lines, res = build_ticket({"Satellite": {"orders": [], "scale": 1.0, "held_before": {"EMIL": 551},
+                                             "held_after": {"EMIL": 551}, "reset_factor": None}},
+                              {"EMIL": 204.05}, min_trim=5000, carried={("Satellite", "EMIL"): -4.0})
+    assert lines == [] and [r["model_shares"] for r in res if r.get("deferred_trim")] == [pytest.approx(-4)]
+
+
+def test_carried_trim_nets_against_a_buy():
+    from fund.engine.types import Order, Reason
+    sl = {"orders": [Order("EMIL", "BUY", 30, 204.05, 6121.5, Reason.TOP5_NEW_TRANCHE)], "scale": 1.0,
+          "held_before": {"EMIL": 551}, "held_after": {"EMIL": 581}, "reset_factor": None}
+    lines, _ = build_ticket({"Satellite": sl}, {"EMIL": 204.05}, min_trim=5000, carried={("Satellite", "EMIL"): -4.0})
+    (l,) = lines
+    assert (l.side, l.qty) == ("BUY", 26)
+
+
+def test_a_full_exit_ignores_carried_trims_and_large_trims_still_trade():
+    lines, _ = build_ticket({"Satellite": _trim("EMIL", 551, 0)}, {"EMIL": 204.05}, min_trim=5000,
+                            carried={("Satellite", "EMIL"): -4.0})
+    assert [(l.side, l.qty, l.full_exit) for l in lines] == [("SELL", 551, True)]
+    lines, _ = build_ticket({"Satellite": _trim("EMIL", 40, 500)}, {"EMIL": 204.05}, min_trim=5000)
+    assert [(l.side, l.qty) for l in lines] == [("SELL", 40)]
+
+
+def test_min_trim_zero_keeps_every_trim():
+    lines, _ = build_ticket({"Satellite": _trim("EMIL", 4, 551)}, {"EMIL": 204.05})
+    assert [(l.side, l.qty) for l in lines] == [("SELL", 4)]
+
+
+def test_min_trim_is_a_ticket_setting_not_a_new_model_version():
+    from fund.config import default_config, next_version, validate
+    old = default_config()
+    assert next_version(old, {**old, "min_trim_value": 10000.0}) == old["version"]
+    assert any("minimum trim" in e for e in validate({**old, "min_trim_value": -1}, date(2026, 10, 4)))

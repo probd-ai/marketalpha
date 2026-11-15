@@ -59,3 +59,11 @@ def test_validate_book_ok(kind, params):
 def test_validate_book_rejects(kind, params, msg):
     errs = validate_book(kind, params)
     assert errs and any(msg in e for e in errs), errs
+
+
+def test_trim_at_is_passed_through_and_validated():
+    b = make_book("tranche", {"max_w": 0.10, "trim_at": 0.15})
+    assert b.trim_at == 0.15 and b.max_w == 0.10
+    assert make_book("tranche", {}).trim_at is None
+    assert validate_book("tranche", {"max_w": 0.10, "trim_at": 0.15}) == []
+    assert any("trim_at" in e for e in validate_book("tranche", {"max_w": 0.10, "trim_at": 0.08}))

@@ -393,3 +393,19 @@ This was an adversarial review of the desk code by the assistant. Human sign-off
 - **Tests:** `tests/fund_desk/test_missed_orders.py` (unit + a real-data replay of the published 09-25 build).
 - **Also 2026-10-04:** NSE trading-holiday calendar (`market_calendar.py`, refresh stage `calendar`, Mongo
   `market_holidays`) — the fill session skips exchange holidays; "Market calendar" pre-trade check.
+
+## 17. Small cap trims and the trim band (2026-10-04)
+
+- **Problem:** tranche sleeves trim any holding above 10% of the sleeve at every weekly run, so a stock at 10.1%
+  produced trims like EMIL 4 shares / ₹816 (backtest: 69–93 trims a year, mostly tiny).
+- **Engine option `trim_at` (tranche params, off by default):** trim only above `trim_at`, back to `max_w`. Backtest
+  2020-10 → 2026-10, back to 10%: 15% band → Growth 33.4 → 34.1% CAGR, DD −24.5 → −26.1%; Satellite 40.3 → 42.9%,
+  DD −35.6 → −37.3%; trims ~1–2/yr. Return change is inside the ±3-pt weekday-luck band. **Not adopted:** turning it
+  on replays from model_start and rebuilt the v4 book (Monday turnover ₹17.0 L → ₹24.5 L), so the fund stays on the
+  researched 10% rule. Version 5 (band on) was computed, discarded, and config restored to v4 (journal
+  `CONFIG_RESTORED`).
+- **Ticket rule `min_trim_value` (default ₹5,000, ticket only, not material):** a line that is only a cap trim and
+  worth less than the minimum (judged on the whole shares that would trade) is held back as a `deferred_trim`
+  residual and carried into the next run's ticket, netting with that week's orders, so hidden trims accumulate and
+  trade once worth it; a full exit ignores them. Tests in `test_ticket_checks.py`; real-data check in
+  `test_missed_orders.py`.

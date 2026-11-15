@@ -113,6 +113,7 @@ class ConfigIn(BaseModel):
     slippage_bp: float | None = None
     reset_cost: float | None = None
     limit_band: float | None = None
+    min_trim_value: float | None = None          # ticket only (not a new model version)
     rebalance_months: list[int] | None = None
     rebalance_band: float | None = None          # send null explicitly to switch the drift band off
     sleeves: list[dict] | None = None
@@ -351,6 +352,50 @@ def put_other_holdings(body: dict[str, OtherHoldingIn]):
 @router.get("/journal")
 def journal(limit: int = 200):
     return _ok(_store().read_journal(min(max(limit, 1), 1000)))
+
+
+# ---------------------------------------------------------------------------------------------------- streak watch
+@router.get("/streak-watch")
+def streak_watch():
+    """Grid-10 sleeves: actual holdings with mean_long vs its 222-SMA (below = exit) and Grid-10's next picks."""
+    from fund.watch import streak_watch as build
+    st = _store()
+    return _ok(build(st.db, st))
+
+
+class ManualTradeIn(BaseModel):
+    sleeve: str
+    symbol: str
+    side: str
+    qty: int
+    price: float
+    note: str | None = None
+    trade_date: str | None = None
+
+
+@router.get("/manual-trades")
+def manual_trades():
+    st = _store()
+    return _ok(st.manual_trades(st.get_config()["version"]))
+
+
+@router.post("/manual-trades")
+def add_manual_trade(body: ManualTradeIn):
+    st = _store()
+    known = lambda s: bool(st.db.symbol_mappings.find_one({"symbol": s}) or st.db.index_meta.find_one({"Symbol": s}))
+    try:
+        return _ok(service.record_manual_trade(st, body.model_dump(), known))
+    except service.RunRefused as e:
+        _refused(e)
+
+
+@router.delete("/manual-trades/{trade_id}")
+def delete_manual_trade(trade_id: str):
+    try:
+        service.delete_manual_trade(_store(), trade_id)
+        return _ok({"deleted": trade_id})
+    except service.RunRefused as e:
+        _refused(e)
 
 
 # ---------------------------------------------------------------------------------------------------- AI Broadcast

@@ -39,7 +39,7 @@ export interface Run {
   _id: string; version: number; engine_version: string; status: RunStatus; run_type: string; signal_date: string;
   fill_date: string; iso_week: string; monthly_reset: boolean; initial_build?: boolean;
   rebalance?: { due: boolean; why: string | null; drift_pts: number; months: number[]; band_pts: number | null }; verdict: Status; checks: Check[]; ticket: TicketLine[];
-  residuals: { sleeve: string; symbol: string; model_shares: number }[]; fund: FundSummary; sleeves: SleeveSummary[];
+  residuals: { sleeve: string; symbol: string; model_shares: number; deferred_trim?: boolean; value?: number }[]; fund: FundSummary; sleeves: SleeveSummary[];
   books: Book[]; curve: Curve; created_at: string; published_at?: string; executions?: Execution[]; fingerprint: string;
   drift_hash?: string | null;
 }
@@ -55,7 +55,7 @@ export interface SleeveConfig {
 }
 export interface FundConfig {
   name: string; capital: number; model_start: string; backfill_weekday: number; slippage_bp: number;
-  reset_cost: number; limit_band: number; rebalance_months: number[]; rebalance_band: number | null; version: number;
+  reset_cost: number; limit_band: number; min_trim_value?: number; rebalance_months: number[]; rebalance_band: number | null; version: number;
   sleeves: SleeveConfig[]; updated_at?: string;
 }
 export interface ActualRow { sleeve: string; symbol: string; actual_qty: number; model_qty: number; gap_qty: number; gap_value: number | null; price: number | null }
@@ -63,6 +63,16 @@ export interface SleeveTracking { sleeve: string; model_value: number; actual_va
 export interface Actual {
   as_of_run: string | null; rows: ActualRow[]; tracking_value: number; sleeves: SleeveTracking[]; undeployed: number;
   other_value: number;
+}
+export interface WatchHolding {
+  symbol: string; qty: number; above: boolean | null; days: number; mean_long: number | null; sma: number | null;
+  grid: number | null; roc22: number | null; in_index: boolean; exit: boolean;
+}
+export interface WatchPick { symbol: string; roc22: number; eligible: boolean }
+export interface StreakWatch { as_of: string | null; sma: number; sleeves: { sleeve: string; universe: string; holdings: WatchHolding[]; picks: WatchPick[] }[] }
+export interface ManualTrade {
+  _id: string; sleeve: string; symbol: string; side: "BUY" | "SELL"; qty: number; price: number; note: string;
+  trade_date: string; recorded_at: string;
 }
 export type Cell = string | number | null;
 export interface PaperSection {
@@ -122,6 +132,11 @@ export const api = {
       { method: "POST", body: JSON.stringify(items) }),
   books: () => req<{ run_id: string | null; signal_date?: string; fund?: FundSummary; books: Book[]; curve?: Curve; sleeves?: SleeveSummary[] }>("/api/fund/books"),
   actual: () => req<Actual>("/api/fund/actual"),
+  streakWatch: () => req<StreakWatch>("/api/fund/streak-watch"),
+  manualTrades: () => req<ManualTrade[]>("/api/fund/manual-trades"),
+  addManualTrade: (t: { sleeve: string; symbol: string; side: "BUY" | "SELL"; qty: number; price: number; note?: string; trade_date?: string }) =>
+    req<ManualTrade>("/api/fund/manual-trades", { method: "POST", body: JSON.stringify(t) }),
+  deleteManualTrade: (id: string) => req<{ deleted: string }>(`/api/fund/manual-trades/${encodeURIComponent(id)}`, { method: "DELETE" }),
   papers: () => req<Paper[]>("/api/fund/papers"),
   paper: (id: string) => req<Paper>(`/api/fund/papers/${encodeURIComponent(id)}`),
   archivePaper: (id: string) => req<{ status: string }>(`/api/fund/papers/${encodeURIComponent(id)}/archive`, { method: "POST" }),

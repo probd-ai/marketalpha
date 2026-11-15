@@ -32,6 +32,7 @@ export default function Settings() {
     mutationFn: (cfg: FundConfig) => api.saveConfig({
       name: cfg.name, capital: cfg.capital, model_start: cfg.model_start, backfill_weekday: cfg.backfill_weekday,
       slippage_bp: cfg.slippage_bp, reset_cost: cfg.reset_cost, limit_band: cfg.limit_band, sleeves: cfg.sleeves,
+      min_trim_value: cfg.min_trim_value ?? 5000,
       rebalance_months: cfg.rebalance_months, rebalance_band: cfg.rebalance_band,
     }),
     onSuccess: () => { setConfirm(false); qc.invalidateQueries(); },
@@ -68,6 +69,9 @@ export default function Settings() {
           <Field label="Slippage per side (bp)"><input className={input} type="number" min={0} step={1} value={c.slippage_bp} onChange={(e) => upd({ slippage_bp: Number(e.target.value) })} /></Field>
           <Field label="Limit band (±%)" hint="Limit price guidance on the ticket, around the reference close.">
             <input className={input} type="number" min={0} step={0.05} value={+(c.limit_band * 100).toFixed(3)} onChange={(e) => upd({ limit_band: Number(e.target.value) / 100 })} />
+          </Field>
+          <Field label="Minimum trim (₹)" hint="Cap trims smaller than this are held back and carried to the next ticket until they add up. Ticket only — no new model version.">
+            <input className={input} type="number" min={0} step={500} value={c.min_trim_value ?? 5000} onChange={(e) => upd({ min_trim_value: Number(e.target.value) })} />
           </Field>
           <Field label="Rebalance cost (%)"><input className={input} type="number" min={0} step={0.01} value={+(c.reset_cost * 100).toFixed(3)} onChange={(e) => upd({ reset_cost: Number(e.target.value) / 100 })} /></Field>
         </div>

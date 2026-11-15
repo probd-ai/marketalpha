@@ -19,7 +19,9 @@ def make_book(kind: str, params: dict | None, symbol: str | None = None):
         return Grid10(int(p.get("n", 10)))
     if kind == "tranche":
         return Tranche(int(p.get("top", 5)), int(p.get("weeks", 8)), int(p.get("slot_div", 40)),
-                       float(p.get("max_w", 0.10)), bool(p.get("deploy_cash", True)))
+                       float(p.get("max_w", 0.10)), bool(p.get("deploy_cash", True)),
+                       float(p["trim_at"]) if p.get("trim_at") is not None else None,
+                       bool(p.get("full_slot", False)))
     if kind == "asset":
         return Asset(symbol)
     raise ValueError(f"unknown sleeve kind {kind!r}")

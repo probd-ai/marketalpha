@@ -131,6 +131,7 @@ class TrackStore(FakeStore):
     def published_runs(self, version): return [{"_id": "R1"}]
     def executions(self, rid=None): return self._execs
     def latest_run(self, version): return self._latest
+    def manual_trades(self, version): return []
 
 
 def _ex(sym, qty, price, sleeve="Growth", side="BUY", status="done", **kw):

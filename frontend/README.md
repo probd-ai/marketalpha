@@ -36,7 +36,10 @@ npm start                # http://localhost:3300
    a review; **Save anyway** keeps it as entered and marks the line.
 7. **Tracking** shows the gap between your recorded positions and the model, and the capital not deployed per sleeve
    (model holdings you don't own — the next ticket will not buy them on its own).
-8. **Other holdings** records what you hold outside the books, so rebalance decisions see your whole position
+8. **Streak watch** (daily, after the refresh): Grid-10 holdings whose mean_long has dropped below its 222-session
+   average are flagged **exit**; replace each with Grid-10's first pick that is above its average. Record both on
+   **Tracking → Manual trades** (the model is not changed — skip later ticket lines for those stocks).
+9. **Other holdings** records what you hold outside the books, so rebalance decisions see your whole position
    (`GET /api/fund/other-holdings`).
 
 - **First run of a model version** is an *initial build*: it buys the whole model book at target weights, sized to

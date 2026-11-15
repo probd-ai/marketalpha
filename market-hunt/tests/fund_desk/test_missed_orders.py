@@ -97,5 +97,8 @@ def test_live_v3_scenario_tickets_the_askautoltd_exit():
         assert l["side"] == "SELL" and l["full_exit"] and abs(l["qty"] - bought) <= 0.1 * bought
         assert "30 Sep" in l["reason_text"] and "INDEX_EXIT" in l["reasons"]
         assert not [c for c in snap["checks"] if c["name"] == "Drift" and c["status"] != "PASS"]
+        # cap trims under ₹5,000 (EMIL / CUPID / SHILPAMED that week) are held back, not ticketed
+        small = [l for l in snap["ticket"] if l["reasons"] == ["TRIM_ABOVE_CAP"] and l["value"] < 5000]
+        assert small == [] and any(r.get("deferred_trim") for r in snap["residuals"])
     finally:
         cli.drop_database("fund_missed_test")

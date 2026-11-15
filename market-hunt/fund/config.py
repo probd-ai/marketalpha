@@ -7,6 +7,8 @@ from datetime import date
 
 from .engine.fund import validate_model_start
 
+MIN_TRIM_DEFAULT = 5000.0         # ₹; a fund config saved before this setting uses it
+
 DEFAULT_CONFIG = {
     "_id": "main",
     "name": "tvagent Fund",
@@ -16,6 +18,7 @@ DEFAULT_CONFIG = {
     "slippage_bp": 5.0,
     "reset_cost": 0.0015,
     "limit_band": 0.003,
+    "min_trim_value": MIN_TRIM_DEFAULT,        # ticket only: cap trims below this (₹) are carried forward until they add up
     "rebalance_months": [1, 7],      # fund-level rebalance on the first run day of these months
     "rebalance_band": 0.05,          # ...and on any month's first run day when a sleeve is > 5 pts from target
     "version": 1,
@@ -39,7 +42,8 @@ SLEEVE_KEYS = {"id", "label", "kind", "universe", "symbol", "weight", "params"}
 PARAMS = {  # name: (type, min, max)
     "grid10": {"n": (int, 1, 50)},
     "tranche": {"top": (int, 1, 20), "weeks": (int, 1, 52), "slot_div": (int, 1, 1000), "max_w": (float, 0.01, 1.0),
-                "deploy_cash": (bool, None, None)},
+                "deploy_cash": (bool, None, None), "trim_at": (float, 0.01, 1.0),
+                "full_slot": (bool, None, None)},
     "asset": {},
 }
 
@@ -71,6 +75,8 @@ def validate(cfg: dict, today: date, universes: set | None = None, symbols: set 
         errors.append("reset cost must be between 0% and 2%")
     if not _num(cfg.get("limit_band", 0), 0, 0.05):
         errors.append("limit band must be between 0% and 5%")
+    if not _num(cfg.get("min_trim_value", MIN_TRIM_DEFAULT), 0, 1e7):
+        errors.append("minimum trim must be between ₹0 and ₹1 Cr")
     if not _num(cfg.get("backfill_weekday", 0), 0, 4, integer=True):
         errors.append("backfill_weekday must be 0 (Mon) .. 4 (Fri)")
     months = cfg.get("rebalance_months", [1, 7])
@@ -137,6 +143,9 @@ def _param_errors(kind: str, params) -> list[str]:
                 errors.append(f"{k} must be true/false")
         elif not _num(v, spec[1], spec[2], integer=spec[0] is int):
             errors.append(f"{k} must be between {spec[1]} and {spec[2]}")
+    if kind == "tranche" and isinstance(params.get("trim_at"), (int, float)) \
+            and params["trim_at"] < float(params.get("max_w", 0.10)):
+        errors.append("trim_at must be at least max_w (it is the level above which a winner is trimmed back to max_w)")
     return errors
 
 
