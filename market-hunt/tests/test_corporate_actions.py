@@ -141,3 +141,13 @@ class TestDetectPriceDiscontinuities:
     def test_reports_the_date_of_the_jump(self):
         hits = detect_price_discontinuities(self._bars([1439.9, 743.3]))
         assert hits[0]["date"] == dt.date(2026, 8, 4)
+
+
+class TestCorporateActionsRequest:
+    def test_never_offers_brotli(self):
+        # NSE answers br when offered; aiohttp here can't decode it -> 400 -> the
+        # fetch returned [] and every split/bonus force-refresh was skipped.
+        from nse_data_client import _CA_HEADERS
+        enc = _CA_HEADERS.get("Accept-Encoding", "")
+        assert enc, "must pin Accept-Encoding, aiohttp's default offers br"
+        assert "br" not in [e.strip() for e in enc.split(",")]

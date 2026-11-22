@@ -590,6 +590,10 @@ _CA_HEADERS = {
                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
+    # NSE serves Brotli when offered and this aiohttp build cannot decode it
+    # ("400, Can not decode content-encoding: br"), which silently returned [] and
+    # skipped every split/bonus force-refresh (2026-11-22). Never advertise br here.
+    "Accept-Encoding": "gzip, deflate",
     "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-actions",
 }
 
