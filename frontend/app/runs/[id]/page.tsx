@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { RunButton } from "@/components/RunButton";
 import { TicketTable } from "@/components/TicketTable";
 import { Badge, Button, Card, Empty, ErrorBox, Loading } from "@/components/ui";
 import { api, type Check } from "@/lib/api";
@@ -40,6 +41,8 @@ export default function RunReview() {
   const refresh = () => { qc.invalidateQueries(); };
   const publish = useMutation({ mutationFn: () => api.publish(id), onSuccess: () => { setConfirming(false); refresh(); } });
   const discard = useMutation({ mutationFn: () => api.discard(id), onSuccess: () => { refresh(); router.push("/"); } });
+  // The ack is recorded in fund config; this run's BLOCK verdict was frozen when it was computed,
+  // so publishing needs a fresh run (which then shows drift as a WARN). Say so instead of looking inert.
   const ack = useMutation({ mutationFn: () => api.ackDrift(id), onSuccess: refresh });
   if (q.isLoading) return <Loading />;
   if (q.error) return <ErrorBox error={q.error} />;
@@ -99,8 +102,18 @@ export default function RunReview() {
           <ul>{r.checks.map((c) => <CheckRow key={c.name} c={c} />)}</ul>
           {driftBlock && r.status === "DRAFT" && (
             <div className="mt-3 rounded-md border border-warn bg-warn-soft p-3 text-[12.5px]">
-              Data changed under a published week. Review the items, then acknowledge to continue; the next run will show drift as a warning.
-              <div className="mt-2"><Button onClick={() => ack.mutate()} disabled={ack.isPending}>Acknowledge drift</Button></div>
+              {ack.isSuccess ? (
+                <>
+                  <b>Drift acknowledged.</b> This run was computed before the acknowledgement, so it stays blocked.
+                  Compute a fresh run — it will show drift as a warning and can be published.
+                  <div className="mt-2"><RunButton /></div>
+                </>
+              ) : (
+                <>
+                  Data changed under a published week. Review the items, then acknowledge to continue; the next run will show drift as a warning.
+                  <div className="mt-2"><Button onClick={() => ack.mutate()} disabled={ack.isPending}>{ack.isPending ? "Acknowledging…" : "Acknowledge drift"}</Button></div>
+                </>
+              )}
             </div>
           )}
         </Card>
