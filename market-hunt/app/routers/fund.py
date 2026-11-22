@@ -338,6 +338,19 @@ class OtherHoldingIn(BaseModel):
     qty: int
     cost_basis: float | None = None
     note: str | None = None
+    sleeve: str | None = None
+
+
+@router.get("/symbols")
+def symbols(q: str = "", limit: int = 12):
+    """Symbol search for desk inputs — the same universe the save paths accept (symbol_mappings ∪ index_meta)."""
+    db = _store().db
+    universe = [{"symbol": d["symbol"], "name": d.get("nse_name") or d.get("company_name")}
+                for d in db.symbol_mappings.find({}, {"_id": 0, "symbol": 1, "nse_name": 1, "company_name": 1})
+                if d.get("symbol")]
+    universe += [{"symbol": d["Symbol"], "name": d.get("Company Name")}
+                 for d in db.index_meta.find({}, {"_id": 0, "Symbol": 1, "Company Name": 1}) if d.get("Symbol")]
+    return _ok(service.search_symbols(q, universe, limit=min(max(limit, 1), 50)))
 
 
 @router.get("/other-holdings")

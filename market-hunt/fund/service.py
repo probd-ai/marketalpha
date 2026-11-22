@@ -496,12 +496,42 @@ def record_executions(store, run_id: str, items: list[dict], price_range=None, c
         return {"run_id": run_id, "status": status, "recorded": len(done), "lines": len(lines)}
 
 
+def search_symbols(q: str, universe: list[dict], limit: int = 12) -> list[dict]:
+    """Rank `universe` ([{symbol, name}]) for a symbol input: exact symbol, then symbol prefix, then symbol substring,
+    then company-name substring; alphabetical within a tier. Plain case-insensitive text matching (no regex), so
+    symbols like M&M work and '.*' matches nothing. Duplicate symbols keep their first name."""
+    needle = str(q or "").strip().upper()
+    if not needle:
+        return []
+    seen, tiers = set(), ([], [], [], [])
+    for row in universe:
+        sym = str(row.get("symbol") or "").strip().upper()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        name = str(row.get("name") or "").strip()
+        if sym == needle:
+            t = 0
+        elif sym.startswith(needle):
+            t = 1
+        elif needle in sym:
+            t = 2
+        elif needle in name.upper():
+            t = 3
+        else:
+            continue
+        tiers[t].append({"symbol": sym, "name": name or sym})
+    out = [r for tier in tiers for r in sorted(tier, key=lambda r: r["symbol"])]
+    return out[:max(1, int(limit))]
+
+
 def set_other_holdings(store, items: dict, known) -> list[dict]:
     """Replace the other (outside-the-books) holding of each given symbol: {SYMBOL: {qty, cost_basis?, note?}};
-    qty 0 removes it. `known(symbol)` must confirm the symbol exists in the market database. Validates everything
-    before writing."""
+    qty 0 removes it. `known(symbol)` must confirm the symbol exists in the market database. Optional `sleeve` tags
+    the holding to a configured sleeve so Tracking counts it toward that sleeve (absent/None = untagged; the whole
+    doc is replaced, so an edit that omits it untags). Validates everything before writing."""
     with _write_lock:
-        clean = {}
+        clean, labels = {}, None
         for sym, o in items.items():
             sym = str(sym).strip().upper()
             if not known(sym):
@@ -510,8 +540,13 @@ def set_other_holdings(store, items: dict, known) -> list[dict]:
             q = _whole(sym, "qty", o.get("qty"))
             cost = _positive_price(sym, "cost_basis", o.get("cost_basis"))
             note = str(o["note"]).strip()[:200] if o.get("note") else None
-            clean[sym] = None if q == 0 else {k: v for k, v in (("qty", q), ("cost_basis", cost), ("note", note))
-                                              if v is not None}
+            sleeve = str(o["sleeve"]).strip() if o.get("sleeve") else None
+            if sleeve is not None:
+                labels = labels or {s["label"] for s in store.get_config()["sleeves"]}
+                if sleeve not in labels:
+                    raise RunRefused(f"{sym}: sleeve must be one of {sorted(labels)}")
+            clean[sym] = None if q == 0 else {k: v for k, v in (("qty", q), ("cost_basis", cost), ("note", note),
+                                                                ("sleeve", sleeve)) if v is not None}
         for sym, doc in clean.items():
             store.set_other_holding(sym, doc)
             store.journal("OTHER_HOLDING_UPDATED", {"symbol": sym, **(doc or {"qty": 0})})
@@ -621,7 +656,8 @@ def other_holdings_view(store, price_of=None) -> dict:
         return {**row, "price": px, "value": row["qty"] * px if px else None}
 
     rows_manual = [valued({"symbol": o["symbol"], "qty": o["qty"], "cost_basis": o.get("cost_basis"),
-                           **({"note": o["note"]} if o.get("note") else {})}) for o in manual]
+                           **({"note": o["note"]} if o.get("note") else {}),
+                           **({"sleeve": o["sleeve"]} if o.get("sleeve") else {})}) for o in manual]
     rows_tickets = [valued({"symbol": e["symbol"], "qty": int(e["extra_qty"]), "cost_basis": e["price"],
                             "source": f"{e['run_id']} {e['line_id']}"})
                     for e in sorted(extras, key=lambda e: (e["symbol"], e["run_id"]))]
@@ -634,8 +670,12 @@ def actual_book(store, price_of=None) -> dict:
 
     Valued at the latest close from `price_of(symbols) -> {symbol: close}` where available, else the model book's
     price. Adds a per-sleeve summary (model / actual / under-invested / over-invested rupees), the capital not
-    deployed (sum of under-invested — the next ticket does not buy it back on its own) and the value of other
-    holdings (outside the books), which are never counted as gaps."""
+    deployed and the value of other holdings (outside the books), which are never counted as gaps.
+
+    Other holdings tagged to a sleeve are tracking-only money for that sleeve (fund NAV is untouched): a tag on a
+    stock the model holds in that sleeve first fills its share gap (row `tagged_qty`); the rest counts by value
+    (`tagged_value`, listed in `tagged`). `to_deploy` = under-invested minus tagged value, floored at 0, and
+    `undeployed` sums it — the next ticket does not buy that back on its own."""
     cfg = store.get_config()
     pos = {k: {"qty": q} for k, q in actual_positions(store).items()}
     latest = store.latest_run(cfg["version"])
@@ -644,31 +684,59 @@ def actual_book(store, price_of=None) -> dict:
         for b in latest["books"]:
             for h in b["holdings"]:
                 model[(b["label"], h["symbol"])] = {"shares": h["shares"], "price": h["price"]}
+    tags = [o for o in store.other_holdings() if o.get("sleeve")]
     keys = sorted(set(pos) | set(model))
-    closes = price_of(sorted({k[1] for k in keys})) if price_of and keys else {}
-    rows, sleeves = [], {}
+    syms = sorted({k[1] for k in keys} | {o["symbol"] for o in tags})
+    closes = price_of(syms) if price_of and syms else {}
+    tag_qty = {(o["sleeve"], o["symbol"]): int(o["qty"]) for o in tags}
+    rows, sleeves, surplus = [], {}, {}
+
+    def sleeve(label):
+        return sleeves.setdefault(label, {"sleeve": label, "model_value": 0.0, "actual_value": 0.0, "under_value": 0.0,
+                                          "over_value": 0.0, "tagged_value": 0.0, "to_deploy": 0.0, "unpriced": 0})
+
     for k in keys:
         a = pos.get(k, {"qty": 0})
         mdl = model.get(k, {"shares": 0.0, "price": None})
         px = closes.get(k[1]) or mdl["price"]
         m_qty = round(mdl["shares"])
-        gap = a["qty"] - m_qty
-        rows.append({"sleeve": k[0], "symbol": k[1], "actual_qty": a["qty"], "model_qty": m_qty,
+        used = min(tag_qty.get(k, 0), max(m_qty - a["qty"], 0)) if k in model else 0
+        if k in tag_qty:
+            surplus[k] = tag_qty[k] - used
+        held = a["qty"] + used
+        gap = held - m_qty
+        rows.append({"sleeve": k[0], "symbol": k[1], "actual_qty": held, "model_qty": m_qty, "tagged_qty": used,
                      "gap_qty": gap, "gap_value": gap * px if px else None, "price": px})
-        s = sleeves.setdefault(k[0], {"sleeve": k[0], "model_value": 0.0, "actual_value": 0.0,
-                                      "under_value": 0.0, "over_value": 0.0, "unpriced": 0})
+        s = sleeve(k[0])
         if not px:
             s["unpriced"] += 1
             continue
         s["model_value"] += m_qty * px
-        s["actual_value"] += a["qty"] * px
+        s["actual_value"] += held * px
         s["under_value"] += max(-gap, 0) * px
         s["over_value"] += max(gap, 0) * px
+    tagged = []
+    for k, q in sorted(tag_qty.items()):
+        q = surplus.get(k, q)
+        if q <= 0:
+            continue
+        px = closes.get(k[1])
+        s = sleeve(k[0])
+        tagged.append({"sleeve": k[0], "symbol": k[1], "qty": q, "price": px, "value": q * px if px else None})
+        if px:
+            s["tagged_value"] += q * px
+        else:
+            s["unpriced"] += 1
+    for s in sleeves.values():
+        s["to_deploy"] = max(s["under_value"] - s["tagged_value"], 0.0)
     sl = sorted(sleeves.values(), key=lambda s: s["sleeve"])
-    return {"as_of_run": latest["_id"] if latest else None, "rows": rows,
+    other = other_holdings_view(store, price_of)
+    untagged = [r for r in other["manual"] if not r.get("sleeve")] + other["from_tickets"]
+    return {"as_of_run": latest["_id"] if latest else None, "rows": rows, "tagged": tagged,
             "tracking_value": sum(abs(r["gap_value"]) for r in rows if r["gap_value"] is not None),
-            "sleeves": sl, "undeployed": sum(s["under_value"] for s in sl),
-            "other_value": other_holdings_view(store, price_of)["value"]}
+            "sleeves": sl, "undeployed": sum(s["to_deploy"] for s in sl),
+            "tagged_value": sum(s["tagged_value"] for s in sl),
+            "other_value": sum(r["value"] for r in untagged if r["value"] is not None)}
 
 
 # ------------------------------------------------------------------------------------------------- performance

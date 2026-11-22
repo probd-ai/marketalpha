@@ -247,3 +247,75 @@ def test_api_returns_warnings_then_saves_on_confirm(monkeypatch):
     assert st.recs == {}
     r = c.post("/api/fund/runs/R1/executions?confirm=true", json=body, headers=h)
     assert r.status_code == 200 and st.recs["L001"]["extra_qty"] == 2 and st.recs["L001"]["price_warning"]
+
+
+# ------------------------------------------------------------------------------------------- sleeve-tagged other holdings
+class CfgStore(FakeStore):
+    def get_config(self): return {"version": 3, "sleeves": [{"label": "Value core"}, {"label": "Growth"}]}
+
+
+def test_other_holding_sleeve_tag_is_validated_and_stored():
+    st, known = CfgStore(), {"ITBEES", "AAA"}.__contains__
+    service.set_other_holdings(st, {"ITBEES": {"qty": 10, "sleeve": "Value core"}}, known)
+    assert st.other["ITBEES"] == {"qty": 10, "sleeve": "Value core"}
+    service.set_other_holdings(st, {"ITBEES": {"qty": 10, "sleeve": None}}, known)        # untag
+    assert st.other["ITBEES"] == {"qty": 10}
+    with pytest.raises(service.RunRefused, match="sleeve"):
+        service.set_other_holdings(st, {"AAA": {"qty": 1, "sleeve": "Nope"}}, known)
+
+
+def test_untagged_setter_needs_no_config():
+    st = FakeStore()                                   # no get_config: untagged saves must not need it
+    service.set_other_holdings(st, {"AAA": {"qty": 1}}, {"AAA"}.__contains__)
+    assert st.other["AAA"] == {"qty": 1}
+
+
+VBOOKS = [{"label": "Value core", "holdings": [{"symbol": "TRENT", "shares": 40, "price": 100.0},
+                                               {"symbol": "ETERNAL", "shares": 50, "price": 10.0}]}]
+
+
+def _track(other, execs=()):
+    closes = {"TRENT": 100.0, "ETERNAL": 10.0, "ITBEES": 2.0, "PAYTM": 50.0}
+    return service.actual_book(TrackStore(list(execs), VBOOKS, other=other),
+                               price_of=lambda syms: {s: closes[s] for s in syms if s in closes})
+
+
+def test_tagged_holding_off_model_counts_by_value_against_the_sleeve_gap():
+    out = _track({"ITBEES": {"qty": 1000, "sleeve": "Value core"}})          # ₹2,000 parked for Value core
+    v = next(s for s in out["sleeves"] if s["sleeve"] == "Value core")
+    assert v["under_value"] == pytest.approx(40 * 100 + 50 * 10)             # per-name gaps unchanged
+    assert v["tagged_value"] == pytest.approx(2000.0)
+    assert v["to_deploy"] == pytest.approx(4500 - 2000)
+    assert out["undeployed"] == pytest.approx(2500.0)
+    assert out["tagged"] == [{"sleeve": "Value core", "symbol": "ITBEES", "qty": 1000, "price": 2.0,
+                              "value": pytest.approx(2000.0)}]
+    assert all(r["symbol"] != "ITBEES" for r in out["rows"])                 # not a model-position row
+
+
+def test_tagged_holding_of_a_model_name_fills_shares_first_then_surplus_is_value():
+    out = _track({"ETERNAL": {"qty": 80, "sleeve": "Value core"}}, execs=[_ex("ETERNAL", 10, 10.0, sleeve="Value core")])
+    row = next(r for r in out["rows"] if r["symbol"] == "ETERNAL")
+    assert (row["actual_qty"], row["tagged_qty"], row["gap_qty"]) == (50, 40, 0)   # 10 executed + 40 of the tag
+    v = next(s for s in out["sleeves"] if s["sleeve"] == "Value core")
+    assert v["tagged_value"] == pytest.approx(40 * 10.0)                     # 80 − 40 used = 40 surplus
+    assert v["to_deploy"] == pytest.approx(40 * 100 - 400)
+
+
+def test_to_deploy_never_negative_and_untagged_stays_outside():
+    out = _track({"PAYTM": {"qty": 1000, "sleeve": "Value core"}, "ITBEES": {"qty": 5}})
+    v = next(s for s in out["sleeves"] if s["sleeve"] == "Value core")
+    assert v["to_deploy"] == 0.0 and out["undeployed"] == 0.0
+    assert [t["symbol"] for t in out["tagged"]] == ["PAYTM"]
+    assert out["other_value"] == pytest.approx(5 * 2.0)                      # only untagged is "outside the books"
+
+
+def test_tag_for_a_sleeve_without_model_holdings_still_shows():
+    out = _track({"PAYTM": {"qty": 2, "sleeve": "Growth"}})
+    g = next(s for s in out["sleeves"] if s["sleeve"] == "Growth")
+    assert (g["model_value"], g["tagged_value"], g["to_deploy"]) == (0.0, pytest.approx(100.0), 0.0)
+
+
+def test_other_holdings_view_carries_the_sleeve():
+    st = TrackStore([], [], other={"ITBEES": {"qty": 3, "sleeve": "Value core"}})
+    v = service.other_holdings_view(st, price_of=lambda syms: {"ITBEES": 2.0})
+    assert v["manual"][0]["sleeve"] == "Value core"

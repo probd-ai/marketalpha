@@ -32,9 +32,10 @@ export interface PriceWarning {
   line_id: string; symbol: string; price: number; ref_px: number; low: number | null; high: number | null; reason: string;
 }
 export interface OtherRow {
-  symbol: string; qty: number; cost_basis: number | null; note?: string; source?: string; price: number | null; value: number | null;
+  symbol: string; qty: number; cost_basis: number | null; note?: string; sleeve?: string; source?: string; price: number | null; value: number | null;
 }
 export interface OtherHoldings { manual: OtherRow[]; from_tickets: OtherRow[]; value: number }
+export interface SymbolHit { symbol: string; name: string }
 export interface Run {
   _id: string; version: number; engine_version: string; status: RunStatus; run_type: string; signal_date: string;
   fill_date: string; iso_week: string; monthly_reset: boolean; initial_build?: boolean;
@@ -58,11 +59,12 @@ export interface FundConfig {
   reset_cost: number; limit_band: number; min_trim_value?: number; rebalance_months: number[]; rebalance_band: number | null; version: number;
   sleeves: SleeveConfig[]; updated_at?: string;
 }
-export interface ActualRow { sleeve: string; symbol: string; actual_qty: number; model_qty: number; gap_qty: number; gap_value: number | null; price: number | null }
-export interface SleeveTracking { sleeve: string; model_value: number; actual_value: number; under_value: number; over_value: number; unpriced: number }
+export interface ActualRow { sleeve: string; symbol: string; actual_qty: number; model_qty: number; tagged_qty: number; gap_qty: number; gap_value: number | null; price: number | null }
+export interface SleeveTracking { sleeve: string; model_value: number; actual_value: number; under_value: number; over_value: number; tagged_value: number; to_deploy: number; unpriced: number }
+export interface TaggedRow { sleeve: string; symbol: string; qty: number; price: number | null; value: number | null }
 export interface Actual {
-  as_of_run: string | null; rows: ActualRow[]; tracking_value: number; sleeves: SleeveTracking[]; undeployed: number;
-  other_value: number;
+  as_of_run: string | null; rows: ActualRow[]; tagged: TaggedRow[]; tracking_value: number; sleeves: SleeveTracking[]; undeployed: number;
+  tagged_value: number; other_value: number;
 }
 export interface WatchHolding {
   symbol: string; qty: number; above: boolean | null; days: number; mean_long: number | null; sma: number | null;
@@ -185,8 +187,9 @@ export const api = {
   papers: () => req<Paper[]>("/api/fund/papers"),
   paper: (id: string) => req<Paper>(`/api/fund/papers/${encodeURIComponent(id)}`),
   archivePaper: (id: string) => req<{ status: string }>(`/api/fund/papers/${encodeURIComponent(id)}/archive`, { method: "POST" }),
+  symbols: (q: string) => req<SymbolHit[]>(`/api/fund/symbols?q=${encodeURIComponent(q)}`),
   otherHoldings: () => req<OtherHoldings>("/api/fund/other-holdings"),
-  saveOtherHoldings: (items: Record<string, { qty: number; cost_basis?: number | null; note?: string | null }>) =>
+  saveOtherHoldings: (items: Record<string, { qty: number; cost_basis?: number | null; note?: string | null; sleeve?: string | null }>) =>
     req<OtherHoldings>("/api/fund/other-holdings", { method: "PUT", body: JSON.stringify(items) }),
   journal: () => req<JournalEntry[]>("/api/fund/journal"),
   cashflows: () => req<CashFlow[]>("/api/fund/cashflows"),
